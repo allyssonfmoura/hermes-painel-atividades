@@ -1,0 +1,14 @@
+[Unit]
+Description=Painel Maestro - servico auxiliar da extensao do Hermes WebUI (127.0.0.1:8796)
+After=network.target
+
+[Service]
+Environment=HOME=/root
+Environment=PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HERMES_WEBUI_STATE_DIR=/root/.hermes/webui
+ExecStart=/usr/bin/python3 /root/Documents/DESENVOLVIMENTO/codigo/hermes-painel-atividades/webui/sidecar/painel_sidecar.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

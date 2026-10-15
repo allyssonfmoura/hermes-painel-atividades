@@ -1,0 +1,554 @@
+/* Painel Maestro — extensão do Hermes WebUI (Allysson).
+ * 1) Aviso de ambiente no topo (VPS online x Mac local)
+ * 2) Painel fixo à direita: agentes agora, arquivos, testar, esperando você,
+ *    sendo atendidos, não analisados, fila — com ações
+ * 3) Barra de conversas com nomes amigáveis, filtros por origem e por cliente
+ * 4) Tela "Agentes": quem paga cada um + montar equipe (receitas)
+ * Dados e ações: serviço auxiliar 127.0.0.1:8796 via /api/extensions/maestro-painel/sidecar/.
+ */
+(() => {
+  'use strict';
+  if (window.__mpPainel) return;
+  window.__mpPainel = true;
+  try { window.hermesExt && window.hermesExt.register && window.hermesExt.register('maestro-painel'); } catch (_) {}
+
+  const SC = 'api/extensions/maestro-painel/sidecar/';
+  const LS = {
+    get: (k, d) => { try { const v = localStorage.getItem('mp.' + k); return v === null ? d : JSON.parse(v); } catch (_) { return d; } },
+    set: (k, v) => { try { localStorage.setItem('mp.' + k, JSON.stringify(v)); } catch (_) {} },
+  };
+  const AG = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes (Opus)' };
+  const ETAPAS = [
+    ['planejar', '1. Planejar', 'Entende e faz a prancha'],
+    ['construir', '2. Construir', 'Escreve o código'],
+    ['revisar', '3. Revisar', 'Outro agente confere'],
+    ['testar', '4. Testar', 'Abre no navegador e confere'],
+  ];
+  const CLIENTES = [
+    ['todos', 'Todos'], ['HOMESET', 'Homeset'], ['GO ON', 'GO ON'], ['Meraki', 'Meraki'], ['geral', 'Geral'],
+  ];
+
+  let estado = null, agentesInfo = null, lendo = false, erro = '';
+
+  // ── utilidades ─────────────────────────────────────────────────────────────
+  const h = (tag, attrs, ...filhos) => {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === undefined || v === null || v === false) continue;
+      if (k === 'class') el.className = v;
+      else if (k === 'style') el.style.cssText = v;
+      else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+      else el.setAttribute(k, v === true ? '' : v);
+    }
+    for (const f of filhos.flat()) {
+      if (f === null || f === undefined || f === false) continue;
+      el.appendChild(typeof f === 'string' || typeof f === 'number' ? document.createTextNode(String(f)) : f);
+    }
+    return el;
+  };
+  const toast = (msg, tipo) => { try { showToast(msg, 3500, tipo); } catch (_) { console.log('[painel]', msg); } };
+  async function chamar(rota, corpo) {
+    const opts = corpo ? { method: 'POST', body: JSON.stringify(corpo), headers: { 'Content-Type': 'application/json' } } : {};
+    return api(SC + rota, Object.assign({ timeoutMs: 60000, timeoutToast: false }, opts));
+  }
+  const rotulo = it => `#${it.n} (${it.nome})`;
+  const urlIssue = n => `https://github.com/${(estado && estado.repo) || 'allyssonfmoura/maestro-os'}/issues/${n}`;
+
+  async function novaConversa(texto, enviar) {
+    try {
+      if (typeof switchPanel === 'function') await switchPanel('chat');
+      await newSession(false);
+      const m = document.getElementById('msg');
+      m.value = texto;
+      m.dispatchEvent(new Event('input', { bubbles: true }));
+      if (enviar) await send();
+      else { m.focus(); m.setSelectionRange(m.value.length, m.value.length); }
+    } catch (e) {
+      toast('Não consegui abrir a conversa: ' + (e.message || e), 'error');
+    }
+  }
+
+  function receitaDe(n) {
+    const r = (estado && estado.receitas) || (agentesInfo && agentesInfo.receitas) || {};
+    const lista = r.receitas || [];
+    const pc = (r.por_chamado || {})[String(n)] || {};
+    const base = lista.find(x => x.id === (pc.receita || r.padrao)) || lista[0] ||
+      { nome: 'Maestro padrão', etapas: { planejar: 'hermes', construir: 'claude', revisar: 'codex', testar: 'hermes' } };
+    const etapas = Object.assign({}, base.etapas);
+    if (etapas.construir) etapas.construir = pc.construir || r.construir_padrao || etapas.construir;
+    return { nome: base.nome, etapas };
+  }
+  const textoEquipe = rec => ETAPAS.map(([k, t]) => `${t.slice(3).toLowerCase()} = ${rec.etapas[k] ? AG[rec.etapas[k]] : 'pular'}`).join('; ');
+
+  // ── ações dos chamados ─────────────────────────────────────────────────────
+  const ACOES = {
+    executar: async it => {
+      const rec = receitaDe(it.n);
+      if (!confirm(`Executar agora ${rotulo(it)}?\n\nEquipe "${rec.nome}": ${textoEquipe(rec)}.`)) return;
+      novaConversa(`Executar agora a Solicitação ${rotulo(it)}.\nEquipe (receita "${rec.nome}"): ${textoEquipe(rec)}.\nSiga o fluxo da skill maestro-os-entrega. Quando ficar pronto, me mande o link, o usuário, a senha e o roteiro de teste.`, true);
+    },
+    fila: async it => mudar(it, 'fila', `${rotulo(it)} foi para a fila`),
+    tirar: async it => mudar(it, 'tirar', `${rotulo(it)} saiu da fila (voltou para análise)`),
+    pausar: async it => {
+      if (!confirm(`Devolver ${rotulo(it)} para a fila?\nSe algum agente estiver trabalhando nele, pare o agente em "Agentes trabalhando agora".`)) return;
+      mudar(it, 'fila', `${rotulo(it)} voltou para a fila`);
+    },
+    decidir: it => novaConversa(`Me mostre a decisão pendente da Solicitação ${rotulo(it)}: o que é, as opções numeradas e a sua recomendação.`, true),
+    analisar: it => novaConversa(`Analise a Solicitação ${rotulo(it)} e me traga o diagnóstico, as opções numeradas e a sua recomendação.`, true),
+    andamento: it => novaConversa(`Como está a Solicitação ${rotulo(it)}? Resumo curto: o que já foi feito, o que falta e se precisa de mim.`, true),
+    abrirTeste: it => novaConversa(`Quero testar a Solicitação ${rotulo(it)}. Me passe o link, o usuário, a senha e o roteiro de teste.`, true),
+    aprovar: it => {
+      if (!confirm(`Aprovar o teste de ${rotulo(it)}?`)) return;
+      novaConversa(`Testei a Solicitação ${rotulo(it)}: aprovado. Siga para o próximo passo e me pergunte antes de publicar em qualquer empresa.`, true);
+    },
+    recusar: it => novaConversa(`Testei a Solicitação ${rotulo(it)}: não aprovado. O problema foi: `, false),
+  };
+  async function mudar(it, acao, ok) {
+    try {
+      await chamar('acao', { acao, n: it.n });
+      toast(ok);
+      setTimeout(atualizar, 4000);
+    } catch (e) { toast('Não deu certo: ' + (e.message || e), 'error'); }
+  }
+
+  const BOTOES = {
+    testar: [['Abrir teste', 'abrirTeste', 1], ['Aprovar', 'aprovar'], ['Recusar', 'recusar']],
+    voce: [['Decidir', 'decidir', 1], ['Executar agora', 'executar'], ['Para a fila', 'fila']],
+    exec: [['Ver andamento', 'andamento', 1], ['Devolver à fila', 'pausar']],
+    analise: [['Analisar', 'analisar', 1], ['Executar agora', 'executar'], ['Para a fila', 'fila']],
+    fila: [['Executar agora', 'executar', 1], ['Tirar da fila', 'tirar']],
+  };
+  const SECOES = [
+    ['testar', 'Para você testar', 'verde', true],
+    ['voce', 'Esperando você', 'vermelho', true],
+    ['exec', 'Sendo atendidos agora', 'azul', true],
+    ['analise', 'Ainda não analisados', 'cinza', false],
+    ['fila', 'Na fila (aprovados)', 'roxo', false],
+  ];
+
+  // ── painel ─────────────────────────────────────────────────────────────────
+  let painel = null;
+  const abertos = LS.get('secoes', { agentes: true, arquivos: true, testar: true, voce: true, exec: true, analise: false, fila: false });
+
+  function montarPainel() {
+    const layout = document.querySelector('.layout');
+    if (!layout || document.getElementById('mpPainel')) return;
+    painel = h('aside', { id: 'mpPainel', class: 'mp-painel', 'aria-label': 'Painel Maestro' });
+    const direita = layout.querySelector('aside.rightpanel');
+    layout.insertBefore(painel, direita || null);
+    aplicarVisivel();
+    desenhar();
+  }
+  function aplicarVisivel() {
+    const v = LS.get('aberto', window.innerWidth > 1000);
+    if (painel) painel.hidden = !v;
+    document.body.classList.toggle('mp-com-painel', !!v);
+    const b = document.getElementById('mpRailPainel');
+    if (b) b.classList.toggle('active', !!v);
+  }
+  function alternarPainel() { LS.set('aberto', !LS.get('aberto', window.innerWidth > 1000)); aplicarVisivel(); if (!painel.hidden) atualizar(); }
+
+  function filtroOk(it) {
+    const f = LS.get('cliente', 'todos');
+    if (f === 'todos') return true;
+    const emp = it.empresas || [];
+    if (f === 'geral') return !emp.some(e => ['HOMESET', 'GO ON', 'Meraki'].includes(e));
+    return emp.includes(f);
+  }
+
+  function secao(chave, titulo, cor, conteudo, contagem) {
+    const aberta = abertos[chave] !== undefined ? abertos[chave] : true;
+    return h('section', { class: 'mp-sec' + (aberta ? ' aberta' : '') },
+      h('button', {
+        type: 'button', class: 'mp-sec-cab',
+        onclick: () => { abertos[chave] = !aberta; LS.set('secoes', abertos); desenhar(); },
+      }, h('span', { class: 'mp-caret' }, '›'), h('span', { class: 'mp-dot ' + cor }), h('span', { class: 'mp-sec-tit' }, titulo),
+      contagem !== undefined ? h('span', { class: 'mp-cnt' }, String(contagem)) : null),
+      aberta ? conteudo : null);
+  }
+
+  function linhaChamado(it, chave) {
+    const temExec = (BOTOES[chave] || []).some(b => b[1] === 'executar');
+    const rc = (estado.receitas || {});
+    const pc = (rc.por_chamado || {})[String(it.n)] || {};
+    return h('div', { class: 'mp-row' },
+      h('a', { class: 'mp-nome', href: urlIssue(it.n), target: '_blank', rel: 'noopener', title: 'Abrir no GitHub' },
+        h('b', null, '#' + it.n), ' ', it.nome),
+      h('div', { class: 'mp-meta' }, it.meta || ''),
+      h('div', { class: 'mp-acoes' },
+        (BOTOES[chave] || []).map(([t, a, pri]) => h('button', { type: 'button', class: 'mp-b' + (pri ? ' pri' : ''), onclick: () => ACOES[a](it) }, t)),
+        temExec ? h('select', {
+          class: 'mp-sel', title: 'Quem constrói este chamado',
+          onchange: async ev => {
+            const por = Object.assign({}, rc.por_chamado || {});
+            por[String(it.n)] = Object.assign({}, pc, { construir: ev.target.value });
+            await salvarReceitas({ por_chamado: por });
+            toast(`${rotulo(it)}: ${AG[ev.target.value]} vai construir`);
+          },
+        }, Object.entries(AG).map(([k, v]) => h('option', { value: k, selected: (pc.construir || rc.construir_padrao || 'claude') === k }, v))) : null));
+  }
+
+  function desenhar() {
+    if (!painel) return;
+    const cab = h('div', { class: 'mp-cab' },
+      h('div', { class: 'mp-tit' }, h('span', { class: 'mp-ponto' }), 'Painel Maestro',
+        h('span', { class: 'mp-atu' }, estado ? 'atualizado ' + estado.atualizado : ''),
+        h('button', { type: 'button', class: 'mp-ic' + (lendo ? ' girando' : ''), title: 'Atualizar agora', onclick: atualizar }, '↻'),
+        h('button', { type: 'button', class: 'mp-ic', title: 'Fechar painel', onclick: alternarPainel }, '✕')),
+      estado ? h('div', { class: 'mp-linha' }, h('span', { class: 'mp-rot' }, 'Quem constrói:'),
+        h('div', { class: 'mp-seg' }, Object.entries(AG).map(([k, v]) => h('button', {
+          type: 'button', class: ((estado.receitas || {}).construir_padrao || 'claude') === k ? 'on' : '',
+          onclick: async () => { await salvarReceitas({ construir_padrao: k }); toast(`Agente padrão para construir: ${v}`); },
+        }, v)))) : null,
+      h('div', { class: 'mp-chips' }, CLIENTES.map(([k, v]) => h('button', {
+        type: 'button', class: 'mp-chip' + (LS.get('cliente', 'todos') === k ? ' on' : ''),
+        onclick: () => { LS.set('cliente', k); desenhar(); },
+      }, v))));
+
+    const corpo = h('div', { class: 'mp-corpo' });
+    if (!estado) {
+      corpo.appendChild(h('div', { class: 'mp-vazio' }, erro ? 'Não consegui ler o painel: ' + erro : 'Carregando…'));
+    } else {
+      if (erro) corpo.appendChild(h('div', { class: 'mp-vazio erro' }, 'Última leitura falhou: ' + erro));
+      // Agentes trabalhando agora
+      const ag = estado.agentes || [];
+      corpo.appendChild(secao('agentes', 'Agentes trabalhando agora', 'pulsando', ag.length ? ag.map(a => h('div', { class: 'mp-row' },
+        h('div', { class: 'mp-nome flex' }, h('span', { class: 'mp-dot ' + (a.agente === 'erro' ? 'vermelho' : 'verde') }), h('b', null, a.nome)),
+        h('div', { class: 'mp-meta' }, a.tarefa + (a.tempo ? ' · há ' + a.tempo : '')),
+        (a.pode_parar || a.sessao) ? h('div', { class: 'mp-acoes' },
+          a.sessao ? h('button', { type: 'button', class: 'mp-b', onclick: () => abrirSessao(a.sessao) }, 'Abrir conversa') : null,
+          a.pode_parar ? h('button', {
+            type: 'button', class: 'mp-b perigo',
+            onclick: async () => {
+              if (!confirm(`Parar ${a.nome} (${a.tarefa})?\nO trabalho já salvo na pasta fica; o que estava no meio se perde.`)) return;
+              try { await chamar('parar', { pid: a.pid }); toast('Agente parado'); setTimeout(atualizar, 1500); } catch (e) { toast('Não deu: ' + (e.message || e), 'error'); }
+            },
+          }, 'Parar') : null) : null)) : h('div', { class: 'mp-vazio' }, 'Nenhum agente trabalhando agora'), ag.length));
+      // Arquivos
+      const arq = estado.arquivos || [];
+      corpo.appendChild(secao('arquivos', 'Arquivos saindo', 'azul', arq.length ? arq.slice(0, 8).map(f => h('div', { class: 'mp-row' },
+        h('a', { class: 'mp-nome', href: f.url, target: '_blank', rel: 'noopener' }, f.nome),
+        h('div', { class: 'mp-meta' }, h('span', { class: 'mp-tag' }, f.tipo), ' ', f.quando),
+        h('div', { class: 'mp-acoes' },
+          h('button', { type: 'button', class: 'mp-b pri', onclick: () => window.open(f.url, '_blank', 'noopener') }, 'Abrir'),
+          h('button', { type: 'button', class: 'mp-b', onclick: () => { navigator.clipboard.writeText(f.url).then(() => toast('Link copiado')); } }, 'Copiar link')))) :
+        h('div', { class: 'mp-vazio' }, 'Nenhum arquivo recente'), arq.length));
+      // Chamados por fase
+      const porChave = Object.fromEntries((estado.grupos || []).map(g => [g.chave, g.itens || []]));
+      for (const [chave, titulo, cor] of SECOES) {
+        const itens = (porChave[chave] || []).filter(filtroOk);
+        const lim = LS.get('lim.' + chave, 5);
+        const conteudo = itens.length ? [
+          ...itens.slice(0, lim).map(it => linhaChamado(it, chave)),
+          itens.length > lim ? h('button', { type: 'button', class: 'mp-mais', onclick: () => { LS.set('lim.' + chave, lim + 20); desenhar(); } }, `ver mais ${Math.min(20, itens.length - lim)} de ${itens.length - lim} →`) : null,
+        ] : h('div', { class: 'mp-vazio' }, 'nada aqui');
+        corpo.appendChild(secao(chave, titulo, cor, conteudo, itens.length));
+      }
+      if (estado.no_ar) corpo.appendChild(h('div', { class: 'mp-vazio rodape' }, `${estado.no_ar} chamados já no ar, só falta fechar`));
+    }
+    painel.replaceChildren(cab, corpo);
+  }
+
+  async function abrirSessao(sid) {
+    try { if (typeof switchPanel === 'function') await switchPanel('chat'); await loadSession(sid); }
+    catch (e) { toast('Essa conversa não abre aqui no navegador', 'error'); }
+  }
+
+  async function salvarReceitas(parcial) {
+    try {
+      const r = await chamar('receitas', parcial);
+      if (estado) estado.receitas = r;
+      if (agentesInfo) agentesInfo.receitas = r;
+      desenhar();
+      if (telaAgentes && !telaAgentes.hidden) desenharAgentes();
+      return r;
+    } catch (e) { toast('Não consegui salvar: ' + (e.message || e), 'error'); throw e; }
+  }
+
+  async function atualizar() {
+    if (lendo) return;
+    lendo = true; desenhar();
+    try { estado = await chamar('estado'); erro = ''; }
+    catch (e) { erro = String((e && e.message) || e).slice(0, 160); }
+    finally { lendo = false; desenhar(); desenharAmbiente(); }
+  }
+
+  // ── aviso de ambiente ──────────────────────────────────────────────────────
+  function desenharAmbiente() {
+    const alvo = document.querySelector('.app-titlebar-left');
+    if (!alvo) return;
+    let b = document.getElementById('mpAmbiente');
+    const amb = estado && estado.ambiente;
+    const naVps = amb ? amb.maquina === 'VPS' : /vpsbr|127\.0\.0\.1|localhost/.test(location.hostname);
+    if (!b) {
+      b = h('button', { id: 'mpAmbiente', type: 'button', class: 'mp-amb', onclick: ev => { ev.stopPropagation(); menuAmbiente(b); } });
+      alvo.appendChild(b);
+    }
+    b.className = 'mp-amb ' + (naVps ? 'vps' : 'mac');
+    b.replaceChildren(h('span', { class: 'mp-amb-d' }), naVps ? 'Você está na VPS · online 24h' : 'Você está no Mac · local', h('span', { class: 'mp-amb-v' }, '▾'));
+    b.title = naVps ? 'O trabalho continua mesmo com o Mac fechado. É onde fica o Maestro.' : 'Só funciona com o Mac ligado.';
+  }
+  function menuAmbiente(ancora) {
+    fecharMenus();
+    const amb = (estado && estado.ambiente) || { maquina: 'VPS', mac: { estado: 'desconhecido', url: '' } };
+    const macOn = amb.mac && amb.mac.estado === 'ligado';
+    const r = ancora.getBoundingClientRect();
+    const menu = h('div', { class: 'mp-menu', style: `top:${r.bottom + 6}px;left:${Math.max(8, r.left - 40)}px` },
+      h('div', { class: 'mp-mi on' }, h('span', { class: 'mp-dot verde' }),
+        h('div', null, h('b', null, 'VPS (servidor online)'), h('span', null, `Liga 24h${amb.ligada_ha ? ' · ligada há ' + amb.ligada_ha : ''}. Os agentes seguem trabalhando com o Mac fechado. É onde fica o Maestro.`)),
+        h('span', { class: 'mp-ok' }, '✓')),
+      h('div', {
+        class: 'mp-mi' + (macOn ? '' : ' off'),
+        onclick: () => { if (macOn && amb.mac.url) window.open(amb.mac.url, '_blank', 'noopener'); },
+      }, h('span', { class: 'mp-dot ' + (macOn ? 'amarelo' : 'cinza') }),
+        h('div', null, h('b', null, 'Mac (local)'), h('span', null, macOn ? 'Ligado. Clique para abrir o Hermes do Mac. Só funciona com o Mac ligado; o que fizer lá fica lá.' : `Desligado agora. Quando ligar, aparece aqui para trocar.`))),
+      h('div', { class: 'mp-mi-nota' }, 'Conta que paga o Hermes: veja em ', h('a', { href: '#', onclick: ev => { ev.preventDefault(); fecharMenus(); abrirAgentes(); } }, 'Agentes'), '.'));
+    document.body.appendChild(menu);
+    setTimeout(() => document.addEventListener('click', fecharMenus, { once: true }), 0);
+  }
+  function fecharMenus() { document.querySelectorAll('.mp-menu').forEach(m => m.remove()); }
+
+  // ── tela Agentes (quem paga + montar equipe) ───────────────────────────────
+  let telaAgentes = null, receitaSel = null, tarefaSel = '';
+  async function abrirAgentes() {
+    if (!telaAgentes) {
+      telaAgentes = h('div', { id: 'mpAgentes', class: 'mp-tela', hidden: true, onclick: ev => { if (ev.target === telaAgentes) fecharAgentes(); } });
+      document.body.appendChild(telaAgentes);
+      document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && telaAgentes && !telaAgentes.hidden) fecharAgentes(); });
+    }
+    telaAgentes.hidden = false;
+    document.getElementById('mpRailAgentes')?.classList.add('active');
+    desenharAgentes();
+    try { agentesInfo = await chamar('agentes'); } catch (e) { agentesInfo = { erro: String(e.message || e) }; }
+    if (!estado) await atualizar();
+    desenharAgentes();
+  }
+  function fecharAgentes() { telaAgentes.hidden = true; document.getElementById('mpRailAgentes')?.classList.remove('active'); }
+
+  function desenharAgentes() {
+    if (!telaAgentes) return;
+    const info = agentesInfo;
+    const card = h('div', { class: 'mp-card-tela' });
+    card.appendChild(h('div', { class: 'mp-tela-cab' }, h('h2', null, 'Agentes'), h('button', { type: 'button', class: 'mp-ic', onclick: fecharAgentes, title: 'Fechar (Esc)' }, '✕')));
+    if (!info) { card.appendChild(h('div', { class: 'mp-vazio' }, 'Carregando…')); telaAgentes.replaceChildren(card); return; }
+    if (info.erro) { card.appendChild(h('div', { class: 'mp-vazio erro' }, 'Não consegui ler: ' + info.erro)); telaAgentes.replaceChildren(card); return; }
+    const pag = Object.fromEntries(info.pagadores.map(p => [p.agente, p]));
+
+    card.appendChild(h('h3', { class: 'mp-h3' }, 'Seus agentes e quem paga'));
+    card.appendChild(h('div', { class: 'mp-grid' }, info.pagadores.map(p => h('div', { class: 'mp-ag' },
+      h('div', { class: 'mp-ag-n' }, p.nome), h('div', { class: 'mp-ag-f' }, p.papel),
+      h('div', { class: 'mp-pay ' + (p.tipo === 'assinatura' ? 'sub' : 'api') },
+        h('span', null, p.tipo === 'assinatura' ? '✅' : '💳'), h('div', null, h('b', null, p.titulo), p.conta)),
+      p.nota ? h('div', { class: 'mp-ag-nota' }, p.nota) : null))));
+    card.appendChild(h('div', { class: 'mp-leg' }, h('span', null, h('i', { class: 'sub' }), 'Assinatura: mensalidade, já está paga (tem limite semanal)'), h('span', null, h('i', { class: 'api' }), 'API: cada uso custa, sai do crédito')));
+
+    // Montar equipe
+    const rc = info.receitas;
+    if (!receitaSel) receitaSel = JSON.parse(JSON.stringify(rc.receitas.find(r => r.id === rc.padrao) || rc.receitas[0]));
+    card.appendChild(h('h3', { class: 'mp-h3' }, 'Montar equipe para uma tarefa grande'));
+    const todos = estado ? (estado.grupos || []).filter(g => g.chave !== 'exec').flatMap(g => g.itens.map(it => Object.assign({ fase: g.titulo }, it))) : [];
+    const eq = h('div', { class: 'mp-eq' });
+    eq.appendChild(h('div', { class: 'mp-linha' }, h('span', { class: 'mp-rot' }, 'Tarefa:'),
+      h('select', { class: 'mp-sel grande', onchange: ev => { tarefaSel = ev.target.value; } },
+        h('option', { value: '' }, '— escolha um chamado —'),
+        todos.map(it => h('option', { value: String(it.n), selected: String(it.n) === tarefaSel }, `#${it.n} (${it.nome.slice(0, 90)}) · ${it.fase}`)))));
+    eq.appendChild(h('div', { class: 'mp-linha' }, h('span', { class: 'mp-rot' }, 'Receita:'),
+      rc.receitas.map(r => h('button', {
+        type: 'button', class: 'mp-chip' + (receitaSel.id === r.id ? ' on' : ''),
+        onclick: () => { receitaSel = JSON.parse(JSON.stringify(r)); desenharAgentes(); },
+      }, r.nome + (rc.padrao === r.id ? ' ★' : ''))),
+      h('button', {
+        type: 'button', class: 'mp-chip tracejado', onclick: () => {
+          const nome = prompt('Nome da nova receita:');
+          if (!nome) return;
+          receitaSel = { id: 'r' + Date.now().toString(36), nome: nome.trim(), etapas: Object.assign({}, receitaSel.etapas), nova: true };
+          desenharAgentes();
+        },
+      }, '+ Criar receita')));
+    const passos = h('div', { class: 'mp-passos' });
+    ETAPAS.forEach(([k, t, d], i) => {
+      const ag = receitaSel.etapas[k] || '';
+      const p = pag[ag];
+      passos.appendChild(h('div', { class: 'mp-passo' },
+        h('div', { class: 'mp-passo-k' }, t), h('div', { class: 'mp-passo-t' }, d),
+        h('select', {
+          class: 'mp-sel', onchange: ev => { receitaSel.etapas[k] = ev.target.value; desenharAgentes(); },
+        }, h('option', { value: '', selected: !ag }, '— pular esta etapa'), Object.entries(AG).map(([ak, av]) => h('option', { value: ak, selected: ag === ak }, av))),
+        p ? h('div', { class: 'mp-paga ' + (p.tipo === 'assinatura' ? 'sub' : 'api') }, p.tipo === 'assinatura' ? '✅ Assinatura' : '💳 API') : h('div', { class: 'mp-paga' }, 'não roda')));
+      if (i < ETAPAS.length - 1) passos.appendChild(h('div', { class: 'mp-seta' }, '→'));
+    });
+    passos.appendChild(h('div', { class: 'mp-seta' }, '→'));
+    passos.appendChild(h('div', { class: 'mp-passo voce' }, h('div', { class: 'mp-passo-k' }, '5. Você'), h('div', { class: 'mp-passo-t' }, 'Recebe link, usuário, senha e roteiro')));
+    eq.appendChild(passos);
+
+    const avisos = [];
+    if (receitaSel.etapas.construir && receitaSel.etapas.construir === receitaSel.etapas.revisar) avisos.push('Quem constrói não deve revisar: escolha outro agente na etapa 3.');
+    if (receitaSel.etapas.construir && pag[receitaSel.etapas.construir] && pag[receitaSel.etapas.construir].tipo === 'api') avisos.push('Construir é o trabalho mais pesado e este agente cobra por uso.');
+    eq.appendChild(h('div', { class: 'mp-regras' },
+      h('div', null, h('b', null, 'Regra 1: quem constrói não revisa'), 'Se o mesmo agente estiver nas etapas 2 e 3, aparece um aviso.'),
+      h('div', null, h('b', null, 'Regra 2: trabalho pesado vai para a assinatura'), 'Construir e revisar rodam em quem já está pago.'),
+      h('div', null, h('b', null, 'Regra 3: a receita fica salva'), 'Monte uma vez e use em todos os chamados; dá para trocar o agente só de um chamado no painel.')));
+    if (avisos.length) eq.appendChild(h('div', { class: 'mp-aviso' }, avisos.map(a => h('div', null, '⚠️ ' + a))));
+
+    eq.appendChild(h('div', { class: 'mp-go' },
+      h('button', {
+        type: 'button', class: 'mp-b', onclick: async () => {
+          const lista = rc.receitas.filter(r => r.id !== receitaSel.id).concat([{ id: receitaSel.id, nome: receitaSel.nome, etapas: receitaSel.etapas }]);
+          await salvarReceitas({ receitas: lista }); delete receitaSel.nova; toast(`Receita "${receitaSel.nome}" salva`);
+        },
+      }, 'Salvar receita'),
+      h('button', {
+        type: 'button', class: 'mp-b', onclick: async () => {
+          const lista = rc.receitas.some(r => r.id === receitaSel.id) ? rc.receitas : rc.receitas.concat([receitaSel]);
+          await salvarReceitas({ receitas: lista, padrao: receitaSel.id }); toast(`"${receitaSel.nome}" agora é a receita padrão`);
+        },
+      }, 'Usar como padrão'),
+      h('span', { class: 'mp-esp' }),
+      h('button', {
+        type: 'button', class: 'mp-b', onclick: async () => {
+          const it = todos.find(x => String(x.n) === tarefaSel);
+          if (!it) return toast('Escolha a tarefa primeiro', 'error');
+          await salvarPorChamado(it, receitaSel);
+          mudar(it, 'fila', `${rotulo(it)} foi para a fila com a receita "${receitaSel.nome}"`);
+        },
+      }, 'Para a fila'),
+      h('button', {
+        type: 'button', class: 'mp-b pri', onclick: async () => {
+          const it = todos.find(x => String(x.n) === tarefaSel);
+          if (!it) return toast('Escolha a tarefa primeiro', 'error');
+          await salvarPorChamado(it, receitaSel);
+          fecharAgentes();
+          ACOES.executar(it);
+        },
+      }, 'Executar agora')));
+    card.appendChild(eq);
+    telaAgentes.replaceChildren(card);
+  }
+  async function salvarPorChamado(it, rec) {
+    const rc = agentesInfo.receitas;
+    const lista = rc.receitas.some(r => r.id === rec.id) ? rc.receitas : rc.receitas.concat([{ id: rec.id, nome: rec.nome, etapas: rec.etapas }]);
+    const por = Object.assign({}, rc.por_chamado || {});
+    por[String(it.n)] = { receita: rec.id, construir: rec.etapas.construir || '' };
+    await salvarReceitas({ receitas: lista, por_chamado: por });
+  }
+
+  // ── barra de ícones (rail) ─────────────────────────────────────────────────
+  function montarRail() {
+    const rail = document.querySelector('nav.rail');
+    if (!rail || document.getElementById('mpRailPainel')) return;
+    const ref = rail.querySelector('.rail-spacer');
+    const svgPainel = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/><path d="M18 8h0"/><path d="M6 8h6M6 12h6M6 16h4"/></svg>';
+    const svgAg = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><circle cx="9" cy="14" r="1.2"/><circle cx="15" cy="14" r="1.2"/></svg>';
+    const b1 = h('button', { id: 'mpRailPainel', type: 'button', class: 'rail-btn nav-tab has-tooltip', 'data-tooltip': 'Painel Maestro', 'aria-label': 'Painel Maestro', onclick: alternarPainel });
+    b1.innerHTML = svgPainel;
+    const b2 = h('button', { id: 'mpRailAgentes', type: 'button', class: 'rail-btn nav-tab has-tooltip', 'data-tooltip': 'Agentes: quem paga e montar equipe', 'aria-label': 'Agentes', onclick: abrirAgentes });
+    b2.innerHTML = svgAg;
+    rail.insertBefore(b1, ref); rail.insertBefore(b2, ref);
+  }
+
+  // ── barra de conversas: nomes amigáveis + filtros ──────────────────────────
+  const ORIGENS = [
+    ['tudo', 'Tudo', null], ['desktop', '💻 App do Mac', ['desktop']], ['terminal', '⌨️ Terminal', ['cli', 'tui', 'acp']],
+    ['telegram', '✈️ Telegram', ['telegram']], ['auto', '🤖 Automáticas', ['cron', 'oneshot', 'kanban', 'webhook']], ['ajudantes', '🧩 Ajudantes', ['subagent']],
+  ];
+  const CLI_RE = [['todos', 'Todos', null], ['homeset', 'Homeset', /homeset|hset|\bhs\b/i], ['goon', 'GO ON', /go ?on|goon/i], ['meraki', 'Meraki', /meraki|mrk/i]];
+  function traduzirFixos() {
+    try {
+      for (const lang of ['pt', 'en']) {
+        if (!LOCALES[lang]) continue;
+        LOCALES[lang].sessions_source_webui = '🌐 Navegador ({0})';
+        LOCALES[lang].sessions_source_cli = '💻 App e outros ({0})';
+      }
+    } catch (_) {}
+  }
+  let aplicando = false, observador = null;
+  function ajustarLista() {
+    const lista = document.getElementById('sessionList');
+    if (!lista || aplicando) return;
+    aplicando = true;
+    try {
+      lista.querySelectorAll('.session-source-tab').forEach(b => {
+        b.textContent = b.textContent.replace(/Sess(?:ões|ions?) WebUI|WebUI sessions/i, '🌐 Navegador').replace(/Sess(?:ões|ions?) CLI|CLI sessions/i, '💻 App e outros');
+        if (/Navegador/.test(b.textContent)) b.title = 'Conversas feitas aqui pelo navegador (Hermes WebUI)';
+        else b.title = 'Conversas do app do Mac, do terminal, do Telegram, automáticas e de ajudantes';
+      });
+      const bar = lista.querySelector('.project-bar');
+      if (bar) {
+        if (!bar.querySelector('.mp-rot-grupos')) bar.insertBefore(h('span', { class: 'mp-rot-grupos' }, 'Grupos:'), bar.firstChild);
+        bar.querySelectorAll('.project-chip').forEach(c => {
+          if (c.textContent === 'All') c.textContent = 'Todos';
+          if (c.textContent === 'Unassigned') { c.textContent = 'Sem grupo'; c.title = 'Conversas que ainda não estão em nenhum grupo'; }
+        });
+        const add = bar.querySelector('.project-create-btn');
+        if (add) { add.title = 'Novo grupo'; add.textContent = '+ Grupo'; }
+      }
+      lista.querySelectorAll(':scope > div').forEach(d => {
+        const t = d.textContent;
+        let m;
+        if ((m = t.match(/^Show (\d+) from other profiles$/))) d.textContent = `Mostrar ${m[1]} de outros perfis`;
+        else if (t === 'Show active profile only') d.textContent = 'Mostrar só este perfil';
+        else if ((m = t.match(/^Show (\d+) archived$/))) d.textContent = `Mostrar ${m[1]} arquivadas`;
+        else if (t === 'Hide archived') d.textContent = 'Esconder arquivadas';
+      });
+
+      // filtros próprios
+      const abaCli = !!lista.querySelector('.session-source-tab.active') && /App e outros/.test(lista.querySelector('.session-source-tab.active').textContent);
+      let f = lista.querySelector('.mp-filtros');
+      if (!f) {
+        f = h('div', { class: 'mp-filtros' });
+        const ancora = bar || lista.querySelector('.session-source-tabs');
+        if (ancora && ancora.nextSibling) lista.insertBefore(f, ancora.nextSibling); else lista.appendChild(f);
+      }
+      const itens = [...lista.querySelectorAll('.session-item')];
+      const origemSel = abaCli ? LS.get('origem', 'tudo') : 'tudo';
+      const cliSel = LS.get('cliConv', 'todos');
+      const linhaOrig = abaCli ? h('div', { class: 'mp-frow' }, h('span', { class: 'mp-rot' }, 'Origem:'), ORIGENS.map(([k, v, keys]) => {
+        const n = keys ? itens.filter(i => keys.includes((i.dataset.sourceKey || '').toLowerCase())).length : itens.length;
+        if (keys && !n && origemSel !== k) return null;
+        return h('button', { type: 'button', class: 'mp-chip mini' + (origemSel === k ? ' on' : ''), onclick: () => { LS.set('origem', k); ajustarLista(); } }, `${v}${keys ? ' ' + n : ''}`);
+      })) : null;
+      const linhaCli = h('div', { class: 'mp-frow' }, h('span', { class: 'mp-rot' }, 'Cliente:'), CLI_RE.map(([k, v]) => h('button', {
+        type: 'button', class: 'mp-chip mini' + (cliSel === k ? ' on' : ''), onclick: () => { LS.set('cliConv', k); ajustarLista(); },
+      }, v)));
+      f.replaceChildren(...[linhaOrig, linhaCli].filter(Boolean));
+      const origKeys = (ORIGENS.find(o => o[0] === origemSel) || [])[2];
+      const cliRe = (CLI_RE.find(o => o[0] === cliSel) || [])[2];
+      itens.forEach(i => {
+        const tit = (i.querySelector('.session-title') || i).textContent || '';
+        const ok = (!origKeys || origKeys.includes((i.dataset.sourceKey || '').toLowerCase())) && (!cliRe || cliRe.test(tit));
+        i.classList.toggle('mp-oculto', !ok);
+      });
+      lista.querySelectorAll('.session-date-group').forEach(g => {
+        const vis = [...g.querySelectorAll('.session-item')].some(i => !i.classList.contains('mp-oculto'));
+        g.classList.toggle('mp-oculto', !vis && (origKeys || cliRe));
+      });
+    } finally {
+      aplicando = false;
+      if (observador) observador.takeRecords(); // descarta as mudanças feitas por mim mesmo
+    }
+  }
+
+  // ── inicialização ──────────────────────────────────────────────────────────
+  function iniciar() {
+    traduzirFixos();
+    montarRail();
+    montarPainel();
+    desenharAmbiente();
+    const lista = document.getElementById('sessionList');
+    if (lista) {
+      let pend = false;
+      observador = new MutationObserver(() => {
+        if (aplicando || pend) return;
+        pend = true;
+        requestAnimationFrame(() => { pend = false; ajustarLista(); });
+      });
+      observador.observe(lista, { childList: true, subtree: true });
+      ajustarLista();
+    }
+    atualizar();
+    setInterval(() => { if (!document.hidden && painel && !painel.hidden) atualizar(); }, 60000);
+    window.addEventListener('resize', () => { if (window.innerWidth < 800 && painel && !painel.hidden && LS.get('aberto', null) === null) painel.hidden = true; });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', iniciar);
+  else iniciar();
+})();

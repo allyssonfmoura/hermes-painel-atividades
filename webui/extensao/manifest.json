@@ -1,0 +1,17 @@
+{
+  "extensions": [
+    {
+      "id": "maestro-painel",
+      "name": "Painel Maestro",
+      "description": "Painel fixo com chamados, agentes e arquivos; aviso de ambiente; filtros da barra de conversas; tela de Agentes.",
+      "scripts": ["assets/painel.js"],
+      "stylesheets": ["assets/painel.css"],
+      "sidecar": {
+        "type": "loopback",
+        "origin": "http://127.0.0.1:8796",
+        "health_path": "/health",
+        "proxy_auth": "token-v1"
+      }
+    }
+  ]
+}
