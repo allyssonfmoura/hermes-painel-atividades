@@ -327,6 +327,17 @@ def salvar_receitas(dados):
     return atual
 
 
+def limite_compressao():
+    try:
+        txt = open(f"{HERMES}/config.yaml").read()
+        m = re.search(r"^compression:\s*\n((?:[ \t]+.*\n)+)", txt, re.M)
+        t = re.search(r"^\s+threshold:\s*([0-9.]+)", m.group(1), re.M) if m else None
+        v = float(t.group(1)) if t else 0.5
+        return round(v * 100) if v <= 1 else round(v)
+    except Exception:  # noqa: BLE001
+        return 50
+
+
 # ── pergunta rápida ───────────────────────────────────────────────────────────
 import threading, uuid  # noqa: E402
 
@@ -364,6 +375,24 @@ def assunto_da_conversa(sid, limite_chars=12000):
         if total > limite_chars or len(linhas) >= 16:
             break
     titulo = d.get("title") or ""
+    if not linhas:  # conversa do app do Mac / terminal: lê do banco do Hermes
+        try:
+            con = sqlite3.connect(f"file:{HERMES}/state.db?mode=ro", uri=True, timeout=2)
+            row = con.execute("select coalesce(title,'') from sessions where id=?", (sid,)).fetchone()
+            titulo = row[0] if row else ""
+            for role, content in con.execute(
+                    "select role, content from messages where session_id=? and role in ('user','assistant') "
+                    "and coalesce(content,'')<>'' order by id desc limit 40", (sid,)):
+                t = re.sub(r"\[Workspace::v1:[^\]]*\]\s*", "", content or "").strip()[:1800]
+                if not t:
+                    continue
+                linhas.append(("Allysson" if role == "user" else "Hermes") + ": " + t)
+                total += len(t)
+                if total > limite_chars or len(linhas) >= 16:
+                    break
+            con.close()
+        except Exception:  # noqa: BLE001
+            pass
     if not linhas:
         return ""
     return f"Conversa principal: \"{titulo}\"\n" + "\n\n".join(reversed(linhas))
@@ -417,7 +446,7 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def _resp(self, cod, corpo):
-        b = json.dumps(corpo, ensure_ascii=False).encode()
+        b = json.dumps(corpo, ensure_ascii=True).encode()
         self.send_response(cod)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -455,7 +484,7 @@ class H(BaseHTTPRequestHandler):
                     "no_ar": est.get("no_ar", 0), "erros": est.get("erros", []), "repo": est.get("repo", REPO),
                     "agora": est.get("agora", []), "rodando": est.get("rodando", []),
                     "agentes": agentes_vivos(), "arquivos": arquivos_recentes(), "ambiente": ambiente(),
-                    "receitas": receitas(),
+                    "receitas": receitas(), "limite_compressao": limite_compressao(),
                 })
             if rota.startswith("/pergunta/"):
                 with _LOCK_P:

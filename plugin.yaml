@@ -1,9 +1,9 @@
 name: painel-atividades
-label: Painel de atividades
-version: 1.0.0
+label: Painel Maestro
+version: 2.0.0
 author: allyssonfmoura
 description: >
-  Painel fixo ao lado da conversa: o que está acontecendo agora, o que está rodando
-  (executores, CI, publicações) e cada Solicitação do Maestro OS com o nome e a fase.
-  Desktop-only (desktop/plugin.js); a página vem da VPS pela tailnet.
+  Painel Maestro no app: aba lateral com chamados, agentes trabalhando, arquivos e Pergunta rápida;
+  página Agentes (quem paga cada um e montar equipe); selo VPS x Mac no topo; faixa Memória da
+  conversa com botão Renovar contexto. Os dados vêm da VPS (serviço auxiliar do WebUI).
 tags: [desktop, maestro]
