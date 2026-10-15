@@ -4,6 +4,7 @@
  *    sendo atendidos, não analisados, fila — com ações
  * 3) Barra de conversas com nomes amigáveis, filtros por origem e por cliente
  * 4) Tela "Agentes": quem paga cada um + montar equipe (receitas)
+ * 5) Conversas: "Rodando agora" fixo no topo + nomes padronizados "#NNN (efeito) · ação"
  * Dados e ações: serviço auxiliar 127.0.0.1:8796 via /api/extensions/maestro-painel/sidecar/.
  */
 (() => {
@@ -690,10 +691,73 @@
         const vis = [...g.querySelectorAll('.session-item')].some(i => !i.classList.contains('mp-oculto'));
         g.classList.toggle('mp-oculto', !vis && (origKeys || cliRe));
       });
+      desenharRodando(lista);
     } finally {
       aplicando = false;
       if (observador) observador.takeRecords(); // descarta as mudanças feitas por mim mesmo
     }
+  }
+
+  // ── rodando agora (fixo no topo da lista) + nomes padronizados ─────────────
+  let rodandoSc = [], rodandoChave = '';
+  function rodandoAgora(lista) {
+    const vistos = new Map();
+    rodandoSc.forEach(r => vistos.set(r.sid, r.titulo));
+    // o WebUI já sabe na hora quais conversas dele estão respondendo
+    lista.querySelectorAll('.session-item[data-sid]').forEach(i => {
+      if (i.querySelector('.session-state-indicator.is-streaming') && !vistos.has(i.dataset.sid))
+        vistos.set(i.dataset.sid, ((i.querySelector('.session-title') || i).textContent || '').trim());
+    });
+    try {
+      if (S && S.busy && S.session && S.session.session_id && !vistos.has(S.session.session_id))
+        vistos.set(S.session.session_id, S.session.title || 'Conversa nova');
+    } catch (_) {}
+    return [...vistos].map(([sid, titulo]) => ({ sid, titulo }));
+  }
+  function partesNome(t) {
+    const m = (t || '').match(/^(\S.*?) (\([^()]*\))( · .*)?$/);
+    return m ? [h('b', {}, m[1]), ' ' + m[2], m[3] ? h('span', { class: 'mp-run-acao' }, m[3]) : null] : [t || 'Conversa'];
+  }
+  function desenharRodando(lista) {
+    const itens = rodandoAgora(lista);
+    const sids = new Set(itens.map(i => i.sid));
+    lista.querySelectorAll('.session-item[data-sid]').forEach(i => i.classList.toggle('mp-run-orig', sids.has(i.dataset.sid)));
+    let bloco = lista.querySelector('.mp-rodando');
+    const chave = JSON.stringify(itens);
+    if (!itens.length) { if (bloco) bloco.remove(); rodandoChave = ''; return; }
+    if (!bloco) {
+      bloco = h('div', { class: 'mp-rodando' });
+      const ancora = lista.querySelector('.mp-filtros');
+      if (ancora && ancora.nextSibling) lista.insertBefore(bloco, ancora.nextSibling); else lista.insertBefore(bloco, lista.firstChild);
+      rodandoChave = '';
+    }
+    if (chave === rodandoChave) return;
+    rodandoChave = chave;
+    const atual = sessaoAtual();
+    bloco.replaceChildren(h('div', { class: 'mp-run-cab' }, '● Rodando agora'), ...itens.map(it => h('button', {
+      type: 'button', class: 'mp-run' + (it.sid === atual ? ' atual' : ''), title: it.titulo, onclick: () => abrirSessao(it.sid),
+    }, h('span', { class: 'mp-run-dot' }), h('span', { class: 'mp-run-t' }, ...partesNome(it.titulo)), h('span', { class: 'mp-run-tag' }, 'rodando'))));
+  }
+  async function lerRodando() {
+    if (document.hidden) return;
+    try { rodandoSc = (await chamar('rodando')).rodando || []; } catch (_) { return; }
+    ajustarLista();
+  }
+  let renomeando = false;
+  async function aplicarNomes() {
+    if (renomeando || document.hidden) return;
+    renomeando = true;
+    try {
+      const nomes = (await chamar('nomes')).nomes || {};
+      for (const [sid, titulo] of Object.entries(nomes)) {
+        try {
+          await api('/api/session/rename', { method: 'POST', body: JSON.stringify({ session_id: sid, title: titulo }) });
+          await chamar('nomes/aplicado', { sid, titulo });
+        } catch (e) {
+          if (/404|not found|Read-only/i.test(String(e && e.message || e))) await chamar('nomes/aplicado', { sid, titulo }).catch(() => {});
+        }
+      }
+    } catch (_) {} finally { renomeando = false; }
   }
 
 
@@ -836,7 +900,7 @@
   // ── inicialização ──────────────────────────────────────────────────────────
   // O WebUI não muda o endereço do CSS entre versões: o navegador pode guardar o antigo.
   // Recarrega o CSS com a versão no endereço quando ela muda.
-  const VERSAO_CSS = '2.1.1';
+  const VERSAO_CSS = '2.2.0';
   function cssAtual() {
     const l = [...document.querySelectorAll('link[rel="stylesheet"]')].find(x => /maestro-painel\/assets\/painel\.css/.test(x.href));
     if (l && !l.href.includes('v=' + VERSAO_CSS)) l.href = l.href.split('?')[0] + '?v=' + VERSAO_CSS;
@@ -862,6 +926,8 @@
     }
     atualizar();
     setInterval(() => { if (!document.hidden && painel && !painel.hidden) atualizar(); }, 60000);
+    lerRodando(); setInterval(lerRodando, 5000);
+    setTimeout(aplicarNomes, 4000); setInterval(aplicarNomes, 60000);
     window.addEventListener('resize', () => { if (window.innerWidth < 800 && painel && !painel.hidden && LS.get('aberto', null) === null) painel.hidden = true; });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', iniciar);

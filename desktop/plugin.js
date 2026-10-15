@@ -3,6 +3,7 @@
 //  • página "Agentes" (quem paga cada um + montar equipe), também no menu da esquerda
 //  • selo de ambiente no topo (VPS online x Mac local)
 //  • faixa "Memória da conversa" + botão Renovar contexto, acima da caixa de mensagem
+//  • chat com o agente trabalhando: fixado no topo da lista, fundo verde e ponto pulsando
 // Dados e ações: serviço auxiliar da VPS (127.0.0.1:8796), alcançado pelo gateway do Hermes
 // com host.request('shell.exec'). Funciona quando o app está ligado à VPS.
 import { host, useValue } from '@hermes/plugin-sdk'
@@ -165,6 +166,11 @@ const CSS = `
 .mpd-mi{display:flex;gap:9px;padding:8px;border-radius:7px;align-items:flex-start;cursor:pointer}.mpd-mi:hover{background:var(--ui-control-hover-background)}
 .mpd-mi b{display:block;margin-bottom:2px}.mpd-mi span{color:var(--ui-text-tertiary);font-size:.7rem;line-height:1.4}
 .mpd-mi .mpd-dot{margin-top:4px}
+[data-mpd-rodando]{background:rgba(63,182,122,.14)!important;box-shadow:inset 0 0 0 1px rgba(63,182,122,.5);border-radius:8px}
+[data-mpd-rodando]::after{content:'';position:absolute;top:50%;right:8px;width:8px;height:8px;margin-top:-4px;border-radius:50%;background:#3fb67a;animation:mpdPulso 1.6s infinite;pointer-events:none;z-index:3}
+[data-mpd-rodando]:hover::after{display:none}
+@keyframes mpdPulso{0%{box-shadow:0 0 0 0 rgba(63,182,122,.6)}70%{box-shadow:0 0 0 7px rgba(63,182,122,0)}100%{box-shadow:0 0 0 0 rgba(63,182,122,0)}}
+@media (prefers-reduced-motion:reduce){[data-mpd-rodando]::after{animation:none}}
 `
 // Sempre troca o conteúdo: depois de reinstalar o plugin, o estilo da versão anterior
 // continuava na página e o painel novo aparecia com o visual velho.
@@ -708,6 +714,65 @@ function Memoria() {
   ] })
 }
 
+// ── Rodando agora: chat com o agente trabalhando fica fixado no topo ─────────
+// Quem está rodando: o serviço auxiliar (/rodando, lê o state.db da VPS: vale para chats do app
+// e do navegador) + o chat aberto quando está ocupado. Fixa com a mesma ação do "Fixar" do app
+// e solta quando termina — só os que ele mesmo fixou; o que o Allysson fixou à mão fica.
+const RUN = { sc: [], meus: new Set(LS.get('pinsRodando', [])) }
+function pinsDoUsuario() {
+  const ids = new Set()
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (!k || !k.startsWith('hermes.desktop.pinnedSessions')) continue
+      const v = JSON.parse(localStorage.getItem(k) || '[]')
+      if (Array.isArray(v)) v.forEach(x => ids.add(String(x)))
+    }
+  } catch (_) {}
+  return ids
+}
+function aplicarRodando(busy, focado) {
+  const mapa = new Map(RUN.sc.map(r => [r.sid, r.titulo]))
+  if (busy && focado && !mapa.has(focado)) mapa.set(focado, '')
+  const fixos = pinsDoUsuario()
+  const jaFixo = sid => [...fixos].some(p => p === sid || p.endsWith(sid))
+  try {
+    for (const sid of mapa.keys()) {
+      if (RUN.meus.has(sid) || jaFixo(sid)) continue
+      host.sessions.pin(sid, true, 0); RUN.meus.add(sid)
+    }
+    for (const sid of [...RUN.meus]) {
+      if (mapa.has(sid)) continue
+      host.sessions.pin(sid, false); RUN.meus.delete(sid)
+    }
+  } catch (_) {}
+  LS.set('pinsRodando', [...RUN.meus])
+  const titulos = new Set([...mapa.values()].filter(Boolean))
+  document.querySelectorAll('.row-hover').forEach(row => {
+    const t = ((row.querySelector('.hover-marquee') || {}).textContent || '').trim()
+    const on = row.getAttribute('data-working') === 'true' || (t && titulos.has(t))
+    if (on && !row.hasAttribute('data-mpd-rodando')) { row.setAttribute('data-mpd-rodando', ''); row.title = 'Rodando agora' }
+    if (!on && row.hasAttribute('data-mpd-rodando')) { row.removeAttribute('data-mpd-rodando'); if (row.title === 'Rodando agora') row.removeAttribute('title') }
+  })
+}
+function RodandoNoTopo() {
+  const busy = useValue(host.state.busy)
+  const focado = useValue(host.state.focusedStoredSessionId)
+  const ref = useRef({ busy, focado })
+  ref.current = { busy, focado }
+  useEffect(() => {
+    injetarCss()
+    let vivo = true
+    const ler = async () => { try { const d = await sc('rodando'); if (vivo) RUN.sc = d.rodando || [] } catch (_) {} }
+    ler()
+    const t1 = setInterval(() => { if (!document.hidden) ler() }, 8000)
+    const t2 = setInterval(() => aplicarRodando(ref.current.busy, ref.current.focado), 1500)
+    return () => { vivo = false; clearInterval(t1); clearInterval(t2) }
+  }, [])
+  useEffect(() => { aplicarRodando(busy, focado) }, [busy, focado])
+  return jsx('span', { style: { display: 'none' } })
+}
+
 export default {
   id: 'painel-atividades',
   name: 'Painel Maestro',
@@ -719,6 +784,7 @@ export default {
       { id: 'nav-agentes', area: 'sidebar.nav', order: 60, data: { codicon: 'hubot', label: 'Agentes', path: '/agentes' } },
       { id: 'ambiente', area: 'titleBar.left', order: 90, render: () => jsx(Ambiente, {}) },
       { id: 'memoria', area: 'composer.top', order: 10, render: () => jsx(Memoria, {}) },
+      { id: 'rodando', area: 'titleBar.left', order: 91, render: () => jsx(RodandoNoTopo, {}) },
     ])
   },
 }

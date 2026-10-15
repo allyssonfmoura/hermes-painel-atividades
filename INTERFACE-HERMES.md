@@ -41,6 +41,19 @@ O app do Mac chega nele por `shell.exec` + curl. Resposta sempre em ASCII (acent
 - `painel-atividades.py` (cron 1 min) agora manda empresas por chamado e junta recebido/sem estado em
   "Ainda não analisados".
 
+**Nomes dos chats e chat rodando** (15/10/2026, prancha `hermes-nomes-chats`, aprovado opção 1)
+- Padrão: `#NNN (efeito) · ação`; sem Solicitação: `Assunto (efeito) · ação`. Efeito até ~5 palavras (o mesmo
+  para todos os chats da mesma Solicitação, guardado em `~/.hermes/painel/efeitos.json`); ação da lista fixa
+  decisão, diagnóstico, execução, teste, status, investigação, ajuste, pergunta. Nome repetido ganha " 2".
+- `webui/sidecar/nomes_chats.py` roda a cada minuto dentro do sidecar (python do agente). Chats do state.db
+  (app, Telegram, cópia dos do navegador) renomeados direto como nome do usuário; os do WebUI viram proposta
+  que a extensão aplica por `/api/session/rename`. Cada chat uma vez só (`~/.hermes/painel/nomes.json`);
+  nome mudado à mão depois fica. Antigos renomeados em 15/10 (lista anterior em `painel/titulos-antes-nomes.tsv`).
+- Rodando = última mensagem há < 15 min e turno não terminou (rota `/rodando`).
+- WebUI: bloco "● Rodando agora" no topo da lista (fundo verde, ponto pulsando, "rodando"); a linha original some.
+- App (plugin 2.2.0): fixa o chat rodando no topo com o "Fixar" do próprio app e solta quando termina (só os que
+  ele fixou); linha com fundo verde e ponto pulsando à direita (some ao passar o mouse, para não cobrir o ⋯).
+
 ## Como publicar uma mudança
 - WebUI: editar `webui/extensao/assets/*`, rodar `python3 webui/instalar.py` (padrão `/root/.hermes/webui`);
   basta recarregar a página.

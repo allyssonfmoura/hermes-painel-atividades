@@ -16,8 +16,13 @@ Rotas:
   POST /acao   {acao: "fechar", ns: [..]} -> fecha internos que já estão no ar (cliente: recusa)
   POST /parar  {pid}           -> encerra um executor (só claude -p / codex exec)
   POST /receitas {...}         -> grava receitas e escolhas por chamado
+  GET  /rodando                -> conversas com o agente trabalhando agora (state.db)
+  GET  /nomes                  -> nomes padronizados a aplicar nas conversas do WebUI
+  POST /nomes/aplicado {sid, titulo} -> extensão avisa que renomeou no WebUI
+
+Em segundo plano, a cada minuto, roda nomes_chats.py (padrão "#NNN (efeito) · ação").
 """
-import hmac, json, os, re, signal, sqlite3, subprocess, time
+import glob, hmac, json, os, re, signal, sqlite3, subprocess, threading, time
 import datetime as dt
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
@@ -499,6 +504,79 @@ def nova_pergunta(d):
     return {"id": pid, "com_assunto": bool(contexto)}
 
 
+# ── nomes padronizados e conversas rodando ─────────────────────────────────────
+NOMES = f"{HERMES}/painel/nomes.json"
+NOMES_APLICADOS = f"{HERMES}/painel/nomes-aplicados.json"
+NOMES_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nomes_chats.py")
+FONTES_FORA = ("oneshot", "subagent", "cron")
+
+
+def python_do_agente():
+    """Venv atual do Hermes (o mesmo que o hermes-webui-launch usa), lido de installs/*/facts.json."""
+    for f in sorted(glob.glob(f"{HERMES}/installs/*/facts.json"), key=os.path.getmtime, reverse=True):
+        env = (ler_json(f, {}).get("packages", {}).get("venv", {}) or {}).get("environment")
+        if env and os.path.exists(f"{env}/bin/python"):
+            return f"{env}/bin/python", os.path.join(os.path.dirname(env), "workspace")
+    return None, None
+
+
+def _ciclo_nomes():
+    while True:
+        try:
+            py, ws = python_do_agente()
+            if py:
+                r = subprocess.run([py, NOMES_SCRIPT], cwd=ws, capture_output=True, text=True, timeout=600)
+                if r.returncode != 0 or "falhou" in r.stderr:
+                    print("nomes_chats:", (r.stderr or r.stdout)[-600:], flush=True)
+        except Exception as e:  # noqa: BLE001
+            print("nomes_chats:", e, flush=True)
+        time.sleep(60)
+
+
+def nomes_pendentes():
+    reg = ler_json(NOMES, {})
+    feitos = ler_json(NOMES_APLICADOS, {})
+    return {sid: t for sid, t in (reg.get("propostas") or {}).items() if feitos.get(sid) != t}
+
+
+def nome_aplicado(d):
+    sid, titulo = str(d.get("sid") or ""), str(d.get("titulo") or "")
+    if not sid or not titulo:
+        raise RuntimeError("faltou sid ou titulo")
+    with _LOCK_NOMES:
+        feitos = ler_json(NOMES_APLICADOS, {})
+        feitos[sid] = titulo
+        gravar_json(NOMES_APLICADOS, feitos)
+    return {"ok": True}
+
+
+def conversas_rodando():
+    """Agente trabalhando = última mensagem há menos de 15 min e o turno não terminou
+    (última é do usuário, de ferramenta, ou do agente pedindo ferramenta)."""
+    con = sqlite3.connect(f"file:{HERMES}/state.db?mode=ro", uri=True, timeout=2)
+    try:
+        agora = time.time()
+        linhas = con.execute(
+            """select s.id, s.source, coalesce(s.title,''), m.role, coalesce(m.finish_reason,''), m.timestamp
+               from sessions s join messages m on m.id = (
+                   select id from messages where session_id = s.id order by timestamp desc, id desc limit 1)
+               where coalesce(s.hidden,0)=0 and s.source not in (?,?,?)
+                 and coalesce(s.title,'') not like 'Subagent%' and m.timestamp > ?""",
+            (*FONTES_FORA, agora - 900)).fetchall()
+    finally:
+        con.close()
+    rodando = []
+    for sid, fonte, titulo, papel, fim, ts in linhas:
+        if papel == "assistant" and fim != "tool_calls":
+            continue
+        rodando.append({"sid": sid, "titulo": titulo or "Conversa nova", "fonte": fonte, "desde": ts})
+    rodando.sort(key=lambda x: -x["desde"])
+    return rodando
+
+
+_LOCK_NOMES = threading.Lock()
+
+
 # ── servidor ──────────────────────────────────────────────────────────────────
 class H(BaseHTTPRequestHandler):
     server_version = "painel-maestro/1"
@@ -551,6 +629,10 @@ class H(BaseHTTPRequestHandler):
                 with _LOCK_P:
                     p = PERGUNTAS.get(rota.split("/")[-1])
                     return self._resp(200, dict(p)) if p else self._resp(404, {"erro": "pergunta não encontrada"})
+            if rota == "/rodando":
+                return self._resp(200, {"rodando": conversas_rodando()})
+            if rota == "/nomes":
+                return self._resp(200, {"nomes": nomes_pendentes()})
             if rota == "/agentes":
                 return self._resp(200, {"pagadores": pagadores(), "receitas": receitas(), "nomes": AGENTES})
             return self._resp(404, {"erro": "rota desconhecida"})
@@ -581,10 +663,14 @@ class H(BaseHTTPRequestHandler):
                 return self._resp(200, salvar_receitas(d))
             if rota == "/pergunta":
                 return self._resp(200, nova_pergunta(d))
+            if rota == "/nomes/aplicado":
+                return self._resp(200, nome_aplicado(d))
             return self._resp(404, {"erro": "rota desconhecida"})
         except Exception as e:  # noqa: BLE001
             return self._resp(400, {"erro": str(e)[:200]})
 
 
 if __name__ == "__main__":
+    if os.environ.get("NOMES_DESLIGADO") != "1":
+        threading.Thread(target=_ciclo_nomes, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", PORTA), H).serve_forever()
