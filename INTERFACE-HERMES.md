@@ -17,6 +17,7 @@ Código: este repositório (`allyssonfmoura/hermes-painel-atividades`), clonado 
     (SUP-/origem: Suporte) ganha `estado: no ar` (Maestro avisa o cliente; fecha no "Sim" ou em 7 dias);
     interno ganha a etiqueta e é fechado. Rodapé separa no ar de cliente x internos; "Ver" fecha internos.
     Painel com 340 px (app e WebUI).
+    Cada chamado mostra a data de abertura ("aberta 07/10 (há 8 dias)"), vinda do cron painel-atividades.py.
   - Pergunta rápida: responde em ~10 s, opcionalmente com o assunto da conversa aberta, sem entrar no histórico.
 - Tela **Agentes** (ícone de robô): quem paga cada agente (assinatura x API) + montar equipe por receitas.
 - Faixa **Memória da conversa** acima da caixa de mensagem (verde/amarelo/vermelho; vermelho = limite de
