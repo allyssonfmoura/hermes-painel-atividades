@@ -264,7 +264,7 @@
       aberta ? conteudo : null);
   }
 
-  const icOk = () => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 16 16'); s.setAttribute('class', 'mp-ico'); s.innerHTML = '<path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="2"/>'; return s; };
+  const icOk = () => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 16 16'); s.setAttribute('class', 'mp-ico'); s.setAttribute('width', '14'); s.setAttribute('height', '14'); s.innerHTML = '<path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="2"/>'; return s; };
   const botaoNoAr = (it, cheio) => h('button', { type: 'button', class: 'mp-b ok' + (cheio ? ' cheio' : ''), title: 'Já subiu e está funcionando', onclick: () => { conf = it.n; desenhar(); } }, icOk(), 'Já está no ar');
   const caixaConfirma = it => h('div', { class: 'mp-conf' },
     h('b', null, `#${it.n} (${curto(it)}) já está no ar?`),
@@ -834,7 +834,15 @@
   }
 
   // ── inicialização ──────────────────────────────────────────────────────────
+  // O WebUI não muda o endereço do CSS entre versões: o navegador pode guardar o antigo.
+  // Recarrega o CSS com a versão no endereço quando ela muda.
+  const VERSAO_CSS = '2.1.1';
+  function cssAtual() {
+    const l = [...document.querySelectorAll('link[rel="stylesheet"]')].find(x => /maestro-painel\/assets\/painel\.css/.test(x.href));
+    if (l && !l.href.includes('v=' + VERSAO_CSS)) l.href = l.href.split('?')[0] + '?v=' + VERSAO_CSS;
+  }
   function iniciar() {
+    cssAtual();
     traduzirFixos();
     montarRail();
     montarPainel();

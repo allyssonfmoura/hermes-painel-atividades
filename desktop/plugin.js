@@ -166,12 +166,12 @@ const CSS = `
 .mpd-mi b{display:block;margin-bottom:2px}.mpd-mi span{color:var(--ui-text-tertiary);font-size:.7rem;line-height:1.4}
 .mpd-mi .mpd-dot{margin-top:4px}
 `
+// Sempre troca o conteúdo: depois de reinstalar o plugin, o estilo da versão anterior
+// continuava na página e o painel novo aparecia com o visual velho.
 function injetarCss() {
-  if (document.getElementById('mpd-css')) return
-  const s = document.createElement('style')
-  s.id = 'mpd-css'
-  s.textContent = CSS
-  document.head.appendChild(s)
+  let s = document.getElementById('mpd-css')
+  if (!s) { s = document.createElement('style'); s.id = 'mpd-css'; document.head.appendChild(s) }
+  if (s.textContent !== CSS) s.textContent = CSS
 }
 
 // ── utilidades DOM ────────────────────────────────────────────────────────────
@@ -380,7 +380,7 @@ function montarPainel(raiz) {
     if (f === 'geral') return !emp.some(e => ['HOMESET', 'GO ON', 'Meraki'].includes(e))
     return emp.includes(f)
   }
-  const IC_OK = () => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 16 16'); s.setAttribute('class', 'mpd-ico'); s.innerHTML = '<path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="2"/>'; return s }
+  const IC_OK = () => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 16 16'); s.setAttribute('class', 'mpd-ico'); s.setAttribute('width', '13'); s.setAttribute('height', '13'); s.innerHTML = '<path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="2"/>'; return s }
   const botaoNoAr = (it, cheio) => h('button', { type: 'button', class: 'mpd-b ok' + (cheio ? ' cheio' : ''), title: 'Já subiu e está funcionando', onclick: () => { G.conf = it.n; desenhar() } }, IC_OK(), 'Já está no ar')
   const caixaConfirma = it => h('div', { class: 'mpd-conf' },
     h('b', null, `#${it.n} (${curto(it)}) já está no ar?`),
