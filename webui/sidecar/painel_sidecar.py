@@ -162,8 +162,10 @@ def agentes_vivos():
         con.close()
         ORIGEM = {"webui": "pelo navegador", "desktop": "pelo app do Mac", "cli": "pelo terminal",
                   "tui": "pelo terminal", "telegram": "pelo Telegram", "subagent": "ajudante",
-                  "cron": "automática", "oneshot": "automática"}
+                  "cron": "automática", "oneshot": "automática", "painel": "no painel"}
         for sid, src, titulo, ultimo, inicio in linhas:
+            if (titulo or "").startswith("Pergunta rápida do Allysson"):
+                titulo, src = "Respondendo uma pergunta rápida", "painel"
             vivos.append({"agente": "hermes", "nome": AGENTES["hermes"] if src != "subagent" else "Hermes (ajudante)",
                           "pid": None, "pode_parar": False, "sessao": sid,
                           "tarefa": (titulo or "conversa sem título") + f" · {ORIGEM.get(src, src)}",
@@ -325,6 +327,88 @@ def salvar_receitas(dados):
     return atual
 
 
+# ── pergunta rápida ───────────────────────────────────────────────────────────
+import threading, uuid  # noqa: E402
+
+HERMES_BIN = "/root/.hermes/hermes-agent/.hermes/bin/hermes"
+PERGUNTAS = {}  # id -> {"estado": "pensando|pronto|erro", "resposta": str, "t": ts}
+_LOCK_P = threading.Lock()
+
+
+def _texto(c):
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return " ".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+    return ""
+
+
+def assunto_da_conversa(sid, limite_chars=12000):
+    if not sid or not re.fullmatch(r"[A-Za-z0-9_\-]{6,64}", sid):
+        return ""
+    try:
+        d = ler_json(os.path.join(STATE_DIR, "sessions", f"{sid}.json"), {})
+    except Exception:  # noqa: BLE001
+        return ""
+    linhas, total = [], 0
+    for m in reversed(d.get("messages") or []):
+        if m.get("role") not in ("user", "assistant"):
+            continue
+        t = _texto(m.get("content")).strip()
+        if not t:
+            continue
+        t = re.sub(r"\[Workspace::v1:[^\]]*\]\s*", "", t)[:1800]
+        quem = "Allysson" if m.get("role") == "user" else "Hermes"
+        linhas.append(f"{quem}: {t}")
+        total += len(t)
+        if total > limite_chars or len(linhas) >= 16:
+            break
+    titulo = d.get("title") or ""
+    if not linhas:
+        return ""
+    return f"Conversa principal: \"{titulo}\"\n" + "\n\n".join(reversed(linhas))
+
+
+def _rodar_pergunta(pid, pergunta, contexto):
+    prompt = (
+        "Pergunta rápida do Allysson, feita num painel lateral. Responda curto e direto, em pt-BR, "
+        "em até 8 linhas, sem perguntar de volta e sem executar nenhuma mudança (só leitura e pesquisa). "
+        "Isto NÃO faz parte da conversa principal.\n\n"
+    )
+    if contexto:
+        prompt += "Para você saber do que ele está falando, este é o trecho recente da conversa principal:\n<<<\n" + contexto + "\n>>>\n\n"
+    prompt += "Pergunta: " + pergunta
+    try:
+        r = subprocess.run([HERMES_BIN, "chat", "-q", prompt, "-Q", "--max-turns", "8", "-t", "web,file"],
+                           capture_output=True, text=True, timeout=240, cwd="/root/workspace",
+                           env=dict(os.environ, HOME="/root"))
+        saida = r.stdout.strip()
+        saida = re.sub(r"\n*session_id:\s*\S+\s*$", "", saida).strip()
+        res = {"estado": "pronto", "resposta": saida or "(sem resposta)"} if r.returncode == 0 or saida else \
+              {"estado": "erro", "resposta": (r.stderr.strip()[-300:] or "o Hermes não respondeu")}
+    except subprocess.TimeoutExpired:
+        res = {"estado": "erro", "resposta": "demorou demais (mais de 4 minutos)"}
+    except Exception as e:  # noqa: BLE001
+        res = {"estado": "erro", "resposta": str(e)[:200]}
+    with _LOCK_P:
+        PERGUNTAS[pid].update(res)
+
+
+def nova_pergunta(d):
+    pergunta = str(d.get("pergunta") or "").strip()[:4000]
+    if not pergunta:
+        raise RuntimeError("escreva a pergunta")
+    contexto = assunto_da_conversa(str(d.get("sessao") or "")) if d.get("com_assunto") else ""
+    pid = uuid.uuid4().hex[:12]
+    with _LOCK_P:
+        agora = time.time()
+        for k in [k for k, v in PERGUNTAS.items() if agora - v["t"] > 3600]:
+            PERGUNTAS.pop(k, None)
+        PERGUNTAS[pid] = {"estado": "pensando", "resposta": "", "t": agora, "com_assunto": bool(contexto)}
+    threading.Thread(target=_rodar_pergunta, args=(pid, pergunta, contexto), daemon=True).start()
+    return {"id": pid, "com_assunto": bool(contexto)}
+
+
 # ── servidor ──────────────────────────────────────────────────────────────────
 class H(BaseHTTPRequestHandler):
     server_version = "painel-maestro/1"
@@ -373,6 +457,10 @@ class H(BaseHTTPRequestHandler):
                     "agentes": agentes_vivos(), "arquivos": arquivos_recentes(), "ambiente": ambiente(),
                     "receitas": receitas(),
                 })
+            if rota.startswith("/pergunta/"):
+                with _LOCK_P:
+                    p = PERGUNTAS.get(rota.split("/")[-1])
+                    return self._resp(200, dict(p)) if p else self._resp(404, {"erro": "pergunta não encontrada"})
             if rota == "/agentes":
                 return self._resp(200, {"pagadores": pagadores(), "receitas": receitas(), "nomes": AGENTES})
             return self._resp(404, {"erro": "rota desconhecida"})
@@ -397,6 +485,8 @@ class H(BaseHTTPRequestHandler):
                 return self._resp(200, parar(int(d.get("pid"))))
             if rota == "/receitas":
                 return self._resp(200, salvar_receitas(d))
+            if rota == "/pergunta":
+                return self._resp(200, nova_pergunta(d))
             return self._resp(404, {"erro": "rota desconhecida"})
         except Exception as e:  # noqa: BLE001
             return self._resp(400, {"erro": str(e)[:200]})

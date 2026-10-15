@@ -188,13 +188,24 @@
         }, Object.entries(AG).map(([k, v]) => h('option', { value: k, selected: (pc.construir || rc.construir_padrao || 'claude') === k }, v))) : null));
   }
 
+  function abas() {
+    const aba = LS.get('aba', 'painel');
+    return h('div', { class: 'mp-abas' },
+      [['painel', 'Painel'], ['pergunta', 'Pergunta rápida']].map(([k, v]) => h('button', {
+        type: 'button', class: 'mp-aba' + (aba === k ? ' on' : ''),
+        onclick: () => { LS.set('aba', k); desenhar(); if (k === 'pergunta') setTimeout(() => document.getElementById('mpPergTexto')?.focus(), 30); },
+      }, v)),
+      h('span', { class: 'mp-esp' }),
+      h('button', { type: 'button', class: 'mp-ic', title: 'Fechar painel', onclick: alternarPainel }, '✕'));
+  }
+
   function desenhar() {
     if (!painel) return;
-    const cab = h('div', { class: 'mp-cab' },
+    if (LS.get('aba', 'painel') === 'pergunta') { desenharPergunta(); return; }
+    const cab = h('div', { class: 'mp-cab' }, abas(),
       h('div', { class: 'mp-tit' }, h('span', { class: 'mp-ponto' }), 'Painel Maestro',
         h('span', { class: 'mp-atu' }, estado ? 'atualizado ' + estado.atualizado : ''),
-        h('button', { type: 'button', class: 'mp-ic' + (lendo ? ' girando' : ''), title: 'Atualizar agora', onclick: atualizar }, '↻'),
-        h('button', { type: 'button', class: 'mp-ic', title: 'Fechar painel', onclick: alternarPainel }, '✕')),
+        h('button', { type: 'button', class: 'mp-ic' + (lendo ? ' girando' : ''), title: 'Atualizar agora', onclick: atualizar }, '↻')),
       estado ? h('div', { class: 'mp-linha' }, h('span', { class: 'mp-rot' }, 'Quem constrói:'),
         h('div', { class: 'mp-seg' }, Object.entries(AG).map(([k, v]) => h('button', {
           type: 'button', class: ((estado.receitas || {}).construir_padrao || 'claude') === k ? 'on' : '',
@@ -515,6 +526,7 @@
       const cliRe = (CLI_RE.find(o => o[0] === cliSel) || [])[2];
       itens.forEach(i => {
         const tit = (i.querySelector('.session-title') || i).textContent || '';
+        if (/^Pergunta rápida do Allysson/.test(tit)) { i.classList.add('mp-oculto'); return; }
         const ok = (!origKeys || origKeys.includes((i.dataset.sourceKey || '').toLowerCase())) && (!cliRe || cliRe.test(tit));
         i.classList.toggle('mp-oculto', !ok);
       });
@@ -528,12 +540,151 @@
     }
   }
 
+
+  // ── pergunta rápida ────────────────────────────────────────────────────────
+  let perguntas = LS.get('perguntas', []);
+  let pergRascunho = '';
+  const sessaoAtual = () => { try { return (S && S.session && S.session.session_id) || ''; } catch (_) { return ''; } };
+  function guardarPerguntas() { LS.set('perguntas', perguntas.slice(-30).map(p => Object.assign({}, p, { estado: p.estado === 'pensando' ? 'erro' : p.estado, resposta: p.estado === 'pensando' ? 'a página foi recarregada antes da resposta' : p.resposta }))); }
+
+  function desenharPergunta() {
+    const comAssunto = LS.get('perg.assunto', true);
+    const lista = h('div', { class: 'mp-qa', id: 'mpQa' });
+    if (!perguntas.length) {
+      lista.appendChild(h('div', { class: 'mp-qa-vazio' },
+        h('b', null, 'Pergunte qualquer coisa aqui.'),
+        'A resposta fica só neste painel e não entra na conversa principal. Funciona mesmo enquanto o Hermes está trabalhando.'));
+    }
+    perguntas.forEach((p, i) => {
+      lista.appendChild(h('div', { class: 'mp-q' }, p.pergunta));
+      const resp = h('div', { class: 'mp-a' + (p.estado === 'erro' ? ' erro' : '') });
+      if (p.estado === 'pensando') resp.appendChild(h('span', { class: 'mp-pensando' }, 'pensando…'));
+      else {
+        const corpo = h('div', { class: 'mp-a-txt' });
+        try { corpo.innerHTML = typeof renderMd === 'function' ? renderMd(p.resposta) : ''; } catch (_) { corpo.textContent = p.resposta; }
+        if (!corpo.innerHTML) corpo.textContent = p.resposta;
+        resp.appendChild(corpo);
+      }
+      resp.appendChild(h('small', null, (p.com_assunto ? 'sabia do assunto da conversa' : 'pergunta solta') + ' · não entrou no histórico'));
+      if (p.estado === 'pronto') resp.appendChild(h('div', { class: 'mp-a-acoes' },
+        h('button', {
+          type: 'button', class: 'mp-link', onclick: () => {
+            const m = document.getElementById('msg');
+            if (!m) return;
+            m.value = (m.value ? m.value + '\n\n' : '') + `Sobre a pergunta rápida "${p.pergunta}", a resposta foi:\n${p.resposta}`;
+            m.dispatchEvent(new Event('input', { bubbles: true })); m.focus();
+            toast('Copiei para a caixa de mensagem; é só enviar');
+          },
+        }, '↳ Levar para a conversa principal'),
+        h('button', { type: 'button', class: 'mp-link', onclick: () => { navigator.clipboard.writeText(p.resposta).then(() => toast('Resposta copiada')); } }, 'Copiar'),
+        h('button', { type: 'button', class: 'mp-link', onclick: () => { perguntas.splice(i, 1); guardarPerguntas(); desenhar(); } }, 'Apagar')));
+      lista.appendChild(resp);
+    });
+    const caixa = h('textarea', {
+      id: 'mpPergTexto', class: 'mp-perg-txt', rows: '3',
+      placeholder: 'Pergunte qualquer coisa. Não atrapalha a conversa principal',
+      oninput: ev => { pergRascunho = ev.target.value; },
+      onkeydown: ev => { if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); perguntar(); } },
+    });
+    caixa.value = pergRascunho;
+    const entrada = h('div', { class: 'mp-perg-in' }, caixa,
+      h('div', { class: 'mp-linha' },
+        h('button', { type: 'button', class: 'mp-chip mini' + (comAssunto ? ' on' : ''), title: 'Ela lê as últimas mensagens da conversa aberta', onclick: () => { LS.set('perg.assunto', true); desenhar(); } }, 'Usar o assunto da conversa'),
+        h('button', { type: 'button', class: 'mp-chip mini' + (!comAssunto ? ' on' : ''), onclick: () => { LS.set('perg.assunto', false); desenhar(); } }, 'Pergunta solta'),
+        h('span', { class: 'mp-esp' }),
+        perguntas.length ? h('button', { type: 'button', class: 'mp-link', onclick: () => { if (confirm('Apagar todas as perguntas rápidas?')) { perguntas = []; guardarPerguntas(); desenhar(); } } }, 'Limpar') : null,
+        h('button', { type: 'button', class: 'mp-b pri', onclick: perguntar }, 'Perguntar')));
+    painel.replaceChildren(h('div', { class: 'mp-cab' }, abas()), lista, entrada);
+    lista.scrollTop = lista.scrollHeight;
+  }
+
+  async function perguntar() {
+    const texto = (pergRascunho || '').trim();
+    if (!texto) return;
+    const comAssunto = LS.get('perg.assunto', true);
+    const item = { pergunta: texto, estado: 'pensando', resposta: '', com_assunto: comAssunto };
+    perguntas.push(item); pergRascunho = ''; desenhar();
+    try {
+      const r = await chamar('pergunta', { pergunta: texto, com_assunto: comAssunto, sessao: sessaoAtual() });
+      item.com_assunto = r.com_assunto;
+      for (let i = 0; i < 150; i++) {
+        await new Promise(ok => setTimeout(ok, 2000));
+        const s = await chamar('pergunta/' + r.id);
+        if (s.estado !== 'pensando') { item.estado = s.estado; item.resposta = s.resposta; break; }
+      }
+      if (item.estado === 'pensando') { item.estado = 'erro'; item.resposta = 'demorou demais'; }
+    } catch (e) { item.estado = 'erro'; item.resposta = 'Não consegui perguntar: ' + (e.message || e); }
+    guardarPerguntas();
+    if (LS.get('aba', 'painel') === 'pergunta') desenhar(); else toast('A pergunta rápida foi respondida');
+  }
+
+  // ── memória da conversa + Renovar contexto ────────────────────────────────
+  let renovarPendente = false, faixa = null;
+  function limiteAuto() {
+    const t = (document.getElementById('ctxTooltipThreshold') || {}).textContent || '';
+    const m = t.match(/\((\d+)%\)/);
+    return m ? Number(m[1]) : 50;
+  }
+  function ocupado() { try { return !!(S && (S.busy || S.activeStreamId)); } catch (_) { return false; } }
+  function montarFaixa() {
+    const comp = document.getElementById('composerWrap');
+    if (!comp || document.getElementById('mpCtx')) return;
+    faixa = h('div', { id: 'mpCtx', class: 'mp-ctx', hidden: true });
+    comp.parentNode.insertBefore(faixa, comp);
+  }
+  function atualizarFaixa() {
+    montarFaixa();
+    if (!faixa) return;
+    const wrap = document.getElementById('ctxIndicatorWrap');
+    const txt = ((document.getElementById('ctxPercent') || {}).textContent || '').trim();
+    const pct = /^\d+$/.test(txt) ? Number(txt) : null;
+    if (pct === null || !wrap || wrap.style.display === 'none' || !sessaoAtual()) { faixa.hidden = true; return; }
+    const lim = limiteAuto(), amarelo = Math.round(lim * 0.7);
+    const cor = pct >= lim ? 'r' : pct >= amarelo ? 'a' : 'v';
+    const msg = cor === 'r' ? 'Renove agora. Se não renovar, o Hermes renova sozinho no meio do trabalho e pode perder detalhes'
+      : cor === 'a' ? 'Bom momento para renovar quando terminar este assunto' : 'Tranquilo, pode seguir';
+    const busy = ocupado();
+    if (renovarPendente && !busy) { renovarPendente = false; setTimeout(() => renovar(true), 300); }
+    const chave = [pct, cor, busy, renovarPendente].join('|');
+    if (faixa.dataset.k === chave && !faixa.hidden) return;
+    faixa.dataset.k = chave;
+    faixa.className = 'mp-ctx ' + cor;
+    faixa.hidden = false;
+    faixa.replaceChildren(
+      h('span', { class: 'mp-ctx-r' }, '🧠 Memória da conversa'),
+      h('span', { class: 'mp-ctx-bar' }, h('i', { style: `width:${Math.min(100, Math.round(pct / lim * 100))}%` })),
+      h('b', null, pct + '%'),
+      h('span', { class: 'mp-ctx-msg' }, msg),
+      h('span', { class: 'mp-esp' }),
+      h('button', {
+        type: 'button', class: 'mp-b' + (cor !== 'v' ? ' pri' : ''), disabled: renovarPendente,
+        title: busy ? 'O Hermes está trabalhando; renovo quando ele terminar' : 'Resumir o que já foi feito e liberar memória',
+        onclick: () => renovar(false),
+      }, renovarPendente ? 'Renovo assim que eu terminar' : 'Renovar contexto'));
+  }
+  async function renovar(automatico) {
+    if (!automatico) {
+      const foco = prompt('Vou resumir o que já fizemos e liberar memória. A conversa continua nesta mesma janela.\n\nO que é importante não esquecer? (opcional)', '');
+      if (foco === null) return;
+      window.__mpFoco = foco.trim();
+      if (ocupado()) { renovarPendente = true; faixa.dataset.k = ''; atualizarFaixa(); toast('Renovo o contexto assim que o Hermes terminar'); return; }
+    }
+    try {
+      if (typeof _runManualCompression !== 'function') throw new Error('função de renovar não encontrada');
+      toast('Renovando o contexto…');
+      await _runManualCompression(window.__mpFoco || '');
+    } catch (e) { toast('Não consegui renovar: ' + (e.message || e), 'error'); }
+    finally { window.__mpFoco = ''; if (faixa) faixa.dataset.k = ''; setTimeout(atualizarFaixa, 1500); }
+  }
+
   // ── inicialização ──────────────────────────────────────────────────────────
   function iniciar() {
     traduzirFixos();
     montarRail();
     montarPainel();
     desenharAmbiente();
+    montarFaixa(); atualizarFaixa();
+    setInterval(atualizarFaixa, 1500);
     const lista = document.getElementById('sessionList');
     if (lista) {
       let pend = false;
