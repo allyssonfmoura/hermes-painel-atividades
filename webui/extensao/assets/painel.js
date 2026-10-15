@@ -146,6 +146,12 @@
     const b = document.getElementById('mpRailPainel');
     if (b) b.classList.toggle('active', !!v);
   }
+  function abrirPergunta() {
+    const jaAberta = painel && !painel.hidden && LS.get('aba', 'painel') === 'pergunta';
+    if (jaAberta) { LS.set('aberto', false); aplicarVisivel(); return; }
+    LS.set('aba', 'pergunta'); LS.set('aberto', true); aplicarVisivel(); desenhar();
+    setTimeout(() => document.getElementById('mpPergTexto')?.focus(), 60);
+  }
   function alternarPainel() { LS.set('aberto', !LS.get('aberto', window.innerWidth > 1000)); aplicarVisivel(); if (!painel.hidden) atualizar(); }
 
   function filtroOk(it) {
@@ -296,7 +302,11 @@
       alvo.appendChild(b);
     }
     b.className = 'mp-amb ' + (naVps ? 'vps' : 'mac');
-    b.replaceChildren(h('span', { class: 'mp-amb-d' }), naVps ? 'Você está na VPS · online 24h' : 'Você está no Mac · local', h('span', { class: 'mp-amb-v' }, '▾'));
+    const curto = window.innerWidth < 700;
+    b.replaceChildren(h('span', { class: 'mp-amb-d' }), naVps ? (curto ? 'VPS' : 'Você está na VPS · online 24h') : (curto ? 'Mac' : 'Você está no Mac · local'), h('span', { class: 'mp-amb-v' }, '▾'));
+    if (!document.getElementById('mpBtnPergunta')) {
+      alvo.appendChild(h('button', { id: 'mpBtnPergunta', type: 'button', class: 'mp-btn-perg', title: 'Pergunta rápida (não entra na conversa)', onclick: abrirPergunta }, '💬', h('span', null, ' Pergunta')));
+    }
     b.title = naVps ? 'O trabalho continua mesmo com o Mac fechado. É onde fica o Maestro.' : 'Só funciona com o Mac ligado.';
   }
   function menuAmbiente(ancora) {
@@ -651,7 +661,7 @@
     faixa.className = 'mp-ctx ' + cor;
     faixa.hidden = false;
     faixa.replaceChildren(
-      h('span', { class: 'mp-ctx-r' }, '🧠 Memória da conversa'),
+      h('span', { class: 'mp-ctx-r' }, window.innerWidth < 700 ? '🧠' : '🧠 Memória da conversa'),
       h('span', { class: 'mp-ctx-bar' }, h('i', { style: `width:${Math.min(100, Math.round(pct / lim * 100))}%` })),
       h('b', null, pct + '%'),
       h('span', { class: 'mp-ctx-msg' }, msg),
@@ -660,7 +670,7 @@
         type: 'button', class: 'mp-b' + (cor !== 'v' ? ' pri' : ''), disabled: renovarPendente,
         title: busy ? 'O Hermes está trabalhando; renovo quando ele terminar' : 'Resumir o que já foi feito e liberar memória',
         onclick: () => renovar(false),
-      }, renovarPendente ? 'Renovo assim que eu terminar' : 'Renovar contexto'));
+      }, renovarPendente ? (window.innerWidth < 700 ? 'Aguardando' : 'Renovo assim que eu terminar') : (window.innerWidth < 700 ? 'Renovar' : 'Renovar contexto')));
   }
   async function renovar(automatico) {
     if (!automatico) {
