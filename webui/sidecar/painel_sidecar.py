@@ -10,6 +10,10 @@ Rotas:
   GET  /estado                 -> chamados por fase, agentes trabalhando, arquivos, ambiente
   GET  /agentes                -> quem paga cada agente (sem segredos) + receitas
   POST /acao   {acao, n}       -> "fila" (vamos fazer) | "tirar" (volta para em análise)
+                                  | "no_ar": já está no ar. Chamado de cliente (SUP-) ganha
+                                    "estado: no ar" (o Maestro avisa o cliente e fecha no "Sim");
+                                    chamado interno ganha a etiqueta e é fechado.
+  POST /acao   {acao: "fechar", ns: [..]} -> fecha internos que já estão no ar (cliente: recusa)
   POST /parar  {pid}           -> encerra um executor (só claude -p / codex exec)
   POST /receitas {...}         -> grava receitas e escolhas por chamado
 """
@@ -274,12 +278,70 @@ def pagadores():
 
 
 # ── ações ─────────────────────────────────────────────────────────────────────
-def mudar_estado(n, novo):
+def info_chamado(n):
     r = subprocess.run(["gh", "issue", "view", str(n), "-R", REPO, "--json", "labels,title,state"],
                        capture_output=True, text=True, timeout=60, cwd=CODIGO)
     if r.returncode != 0:
         raise RuntimeError("não achei o chamado no GitHub")
-    info = json.loads(r.stdout)
+    return json.loads(r.stdout)
+
+
+def de_cliente(info):
+    """Chamado aberto por um cliente no Suporte do Maestro (mesma regra do painel-atividades.py)."""
+    return info["title"].startswith("[SUP-") or any(l["name"] == "origem: Suporte" for l in info["labels"])
+
+
+def regerar_painel():
+    # atualiza o painel na hora (o cron também roda a cada minuto)
+    subprocess.Popen(["/usr/bin/python3", f"{HERMES}/scripts/painel-atividades.py"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def fechar_interno(n, info=None):
+    info = info or info_chamado(n)
+    if de_cliente(info):
+        raise RuntimeError(f"#{n} é de cliente: fecha quando ele confirmar no Suporte")
+    if info.get("state") != "OPEN":
+        return {"ok": True, "n": n, "ja_fechado": True}
+    # o gh da VPS é antigo (sem --reason/-c no close): comenta e fecha pela API
+    subprocess.run(["gh", "issue", "comment", str(n), "-R", REPO, "-b",
+                    "Já está no ar. Fechado pelo Allysson no Painel Maestro."],
+                   capture_output=True, text=True, timeout=60, cwd=CODIGO)
+    r = subprocess.run(["gh", "api", "-X", "PATCH", f"repos/{REPO}/issues/{n}",
+                        "-f", "state=closed", "-f", "state_reason=completed"],
+                       capture_output=True, text=True, timeout=60, cwd=CODIGO)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip()[:200] or "o GitHub recusou fechar")
+    return {"ok": True, "n": n}
+
+
+def ja_no_ar(n):
+    info = info_chamado(n)
+    cliente = de_cliente(info)
+    res = mudar_estado(n, "estado: no ar", info=info, regerar=False)
+    if not cliente:
+        fechar_interno(n, info)
+    regerar_painel()
+    return dict(res, cliente=cliente, fechado=not cliente)
+
+
+def fechar_varios(ns):
+    feitos, erros = [], []
+    for n in ns[:60]:
+        try:
+            info = info_chamado(int(n))
+            if not any(l["name"] == "estado: no ar" for l in info["labels"]):
+                raise RuntimeError(f"#{n} não está marcado como no ar")
+            fechar_interno(int(n), info)
+            feitos.append(int(n))
+        except Exception as e:  # noqa: BLE001
+            erros.append(str(e)[:120])
+    regerar_painel()
+    return {"ok": not erros, "fechados": feitos, "erros": erros}
+
+
+def mudar_estado(n, novo, info=None, regerar=True):
+    info = info or info_chamado(n)
     if info.get("state") != "OPEN":
         raise RuntimeError("o chamado já está fechado")
     atuais = [l["name"] for l in info["labels"] if l["name"].startswith("estado:")]
@@ -290,9 +352,8 @@ def mudar_estado(n, novo):
     r = subprocess.run(args, capture_output=True, text=True, timeout=60, cwd=CODIGO)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip()[:200] or "o GitHub recusou")
-    # atualiza o painel na hora (o cron também roda a cada minuto)
-    subprocess.Popen(["/usr/bin/python3", f"{HERMES}/scripts/painel-atividades.py"],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if regerar:
+        regerar_painel()
     return {"ok": True, "antes": atuais, "agora": novo}
 
 
@@ -481,7 +542,7 @@ class H(BaseHTTPRequestHandler):
                 est = ler_json(ESTADO, {})
                 return self._resp(200, {
                     "atualizado": est.get("atualizado", ""), "grupos": est.get("grupos", []),
-                    "no_ar": est.get("no_ar", 0), "erros": est.get("erros", []), "repo": est.get("repo", REPO),
+                    "no_ar": est.get("no_ar", 0), "no_ar_itens": est.get("no_ar_itens", []), "erros": est.get("erros", []), "repo": est.get("repo", REPO),
                     "agora": est.get("agora", []), "rodando": est.get("rodando", []),
                     "agentes": agentes_vivos(), "arquivos": arquivos_recentes(), "ambiente": ambiente(),
                     "receitas": receitas(), "limite_compressao": limite_compressao(),
@@ -503,8 +564,12 @@ class H(BaseHTTPRequestHandler):
         try:
             d = self._corpo()
             if rota == "/acao":
-                n = int(d.get("n"))
                 acao = d.get("acao")
+                if acao == "fechar":
+                    return self._resp(200, fechar_varios([int(x) for x in (d.get("ns") or [])]))
+                n = int(d.get("n"))
+                if acao == "no_ar":
+                    return self._resp(200, ja_no_ar(n))
                 if acao == "fila":
                     return self._resp(200, mudar_estado(n, "estado: vamos fazer"))
                 if acao == "tirar":

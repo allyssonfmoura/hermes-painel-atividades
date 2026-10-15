@@ -102,6 +102,7 @@
       novaConversa(`Testei a Solicitação ${rotulo(it)}: aprovado. Siga para o próximo passo e me pergunte antes de publicar em qualquer empresa.`, true);
     },
     recusar: it => novaConversa(`Testei a Solicitação ${rotulo(it)}: não aprovado. O problema foi: `, false),
+    github: it => window.open(urlIssue(it.n), '_blank', 'noopener'),
   };
   async function mudar(it, acao, ok) {
     try {
@@ -111,24 +112,114 @@
     } catch (e) { toast('Não deu certo: ' + (e.message || e), 'error'); }
   }
 
+  // Botões à vista (o 1º é o principal) + o que vai para o menu ⋯. 'noar' = botão "Já está no ar".
   const BOTOES = {
-    testar: [['Abrir teste', 'abrirTeste', 1], ['Aprovar', 'aprovar'], ['Recusar', 'recusar']],
-    voce: [['Decidir', 'decidir', 1], ['Executar agora', 'executar'], ['Para a fila', 'fila']],
-    exec: [['Ver andamento', 'andamento', 1], ['Devolver à fila', 'pausar']],
-    analise: [['Analisar', 'analisar', 1], ['Executar agora', 'executar'], ['Para a fila', 'fila']],
-    fila: [['Executar agora', 'executar', 1], ['Tirar da fila', 'tirar']],
+    voce: { ver: [['Decidir', 'decidir', 1], 'noar'], menu: ['executar', 'fila', 'construir', 'github'] },
+    testar: { ver: [['Abrir teste', 'abrirTeste', 1], ['Aprovar', 'aprovar'], 'noar'], menu: ['recusar', 'github'] },
+    exec: { ver: [['Ver andamento', 'andamento', 1], 'noar'], menu: ['pausar', 'construir', 'github'] },
+    analise: { ver: [['Analisar', 'analisar', 1]], menu: ['executar', 'fila', 'construir', 'github'] },
+    fila: { ver: [['Executar agora', 'executar', 1]], menu: ['tirar', 'construir', 'github'] },
   };
+  const MENU_TXT = {
+    executar: ['Executar agora', 'começa a construir já'], fila: ['Para a fila', 'aprovado, entra na fila'],
+    pausar: ['Devolver à fila', 'volta para a fila de aprovados'], tirar: ['Tirar da fila', 'volta para análise'],
+    recusar: ['Recusar o teste', 'abre uma conversa para você contar o problema'], github: ['Abrir no GitHub', ''],
+  };
+  // Ordem: primeiro o que precisa de você. Agentes e arquivos entram depois de "Sendo atendidos".
   const SECOES = [
-    ['testar', 'Para você testar', 'verde', true],
-    ['voce', 'Esperando você', 'vermelho', true],
-    ['exec', 'Sendo atendidos agora', 'azul', true],
-    ['analise', 'Ainda não analisados', 'cinza', false],
-    ['fila', 'Na fila (aprovados)', 'roxo', false],
+    ['voce', 'Esperando você', 'vermelho'],
+    ['testar', 'Para você testar', 'verde'],
+    ['exec', 'Sendo atendidos agora', 'azul'],
+    ['fila', 'Na fila (aprovados)', 'roxo'],
+    ['analise', 'Ainda não analisados', 'cinza'],
   ];
+  const ABERTAS = { voce: true, testar: true, exec: true, agentes: false, arquivos: false, fila: false, analise: false };
+  const POR_SECAO = 3;
+  const ESPERA_DESFAZER = 10000;
+
+  // "Já está no ar": confirma no painel, some na hora e só manda ao GitHub depois de 10 s (Desfazer).
+  let conf = null;               // número do chamado com a confirmação aberta
+  const pend = new Map();        // n -> { it, t, ate }
+  const feitos = new Set();      // já mandados; escondidos até a próxima leitura
+  let vista = 'painel', marcados = null, tique = null;
+  const curto = it => {
+    let t = (it.nome || '').replace(/^\[SUP-[^\]]*\]\s*/, '').split(/[:(]/)[0].trim();
+    if (t.length > 42) t = t.slice(0, 42).replace(/\s+\S*$/, '') + '…';
+    return t;
+  };
+  const escondido = n => pend.has(n) || feitos.has(n);
+  function confirmarNoAr(it) {
+    conf = null;
+    const t = setTimeout(() => mandarNoAr(it.n), ESPERA_DESFAZER);
+    pend.set(it.n, { it, t, ate: Date.now() + ESPERA_DESFAZER });
+    desenhar();
+  }
+  async function mandarNoAr(n) {
+    const p = pend.get(n);
+    if (!p) return;
+    clearTimeout(p.t);
+    try {
+      const r = await chamar('acao', { acao: 'no_ar', n });
+      feitos.add(n);
+      toast(r.cliente ? `#${n} (${curto(p.it)}) está no ar; o cliente foi avisado` : `#${n} (${curto(p.it)}) fechado`);
+      setTimeout(atualizar, 3000);
+    } catch (e) { toast(`Não consegui marcar #${n} (${curto(p.it)}): ` + (e.message || e), 'error'); }
+    pend.delete(n); desenhar();
+  }
+  function desfazerNoAr(n) {
+    const p = pend.get(n);
+    if (p) { clearTimeout(p.t); pend.delete(n); desenhar(); }
+  }
+  // Recarregar ou fechar a página não pode perder um "Já está no ar" confirmado: manda na hora.
+  window.addEventListener('pagehide', () => {
+    for (const n of pend.keys()) {
+      try { fetch(new URL(SC + 'acao', document.baseURI || location.href), { method: 'POST', keepalive: true, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ acao: 'no_ar', n }) }); } catch (_) {}
+    }
+  });
+  async function fecharInternos(ns) {
+    try {
+      const r = await chamar('acao', { acao: 'fechar', ns });
+      r.fechados.forEach(n => feitos.add(n));
+      toast(`${r.fechados.length} chamado(s) interno(s) fechado(s)` + (r.erros.length ? `; ${r.erros.length} não deu: ${r.erros[0]}` : ''), r.erros.length ? 'error' : undefined);
+      setTimeout(atualizar, 3000);
+    } catch (e) { toast('Não consegui fechar: ' + (e.message || e), 'error'); }
+    desenhar();
+  }
+  function menuAcoes(ev, it, chave) {
+    ev.stopPropagation();
+    fecharMenus();
+    const rc = estado.receitas || {};
+    const pc = (rc.por_chamado || {})[String(it.n)] || {};
+    const atual = pc.construir || rc.construir_padrao || 'claude';
+    const r = ev.currentTarget.getBoundingClientRect();
+    const itens = [];
+    for (const a of BOTOES[chave].menu) {
+      if (a === 'construir') {
+        itens.push(h('div', { class: 'mp-mh' }, 'Quem constrói este chamado'));
+        for (const [k, v] of Object.entries(AG)) itens.push(h('div', {
+          class: 'mp-mi', onclick: async () => {
+            fecharMenus();
+            const por = Object.assign({}, rc.por_chamado || {});
+            por[String(it.n)] = Object.assign({}, pc, { construir: k });
+            await salvarReceitas({ por_chamado: por });
+            toast(`${rotulo(it)}: ${v} vai construir`);
+          },
+        }, h('div', null, h('b', null, (atual === k ? '✓ ' : '') + v))));
+        itens.push(h('hr', { class: 'mp-hr' }));
+      } else {
+        const [t, d] = MENU_TXT[a];
+        itens.push(h('div', { class: 'mp-mi', onclick: () => { fecharMenus(); ACOES[a](it); } }, h('div', null, h('b', null, t), d ? h('span', null, d) : null)));
+      }
+    }
+    const w = Math.min(250, window.innerWidth - 16);
+    const menu = h('div', { class: 'mp-menu mp-menu-acoes', style: `width:${w}px;top:${Math.max(8, Math.min(r.bottom + 4, window.innerHeight - 340))}px;left:${Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8))}px` }, itens);
+    document.body.appendChild(menu);
+    setTimeout(() => document.addEventListener('click', fecharMenus, { once: true }), 0);
+  }
 
   // ── painel ─────────────────────────────────────────────────────────────────
   let painel = null;
-  const abertos = LS.get('secoes', { agentes: true, arquivos: true, testar: true, voce: true, exec: true, analise: false, fila: false });
+  const abertos = LS.get('secoes2', Object.assign({}, ABERTAS));
 
   function montarPainel() {
     const layout = document.querySelector('.layout');
@@ -162,36 +253,83 @@
     return emp.includes(f);
   }
 
-  function secao(chave, titulo, cor, conteudo, contagem) {
-    const aberta = abertos[chave] !== undefined ? abertos[chave] : true;
+  function secao(chave, titulo, cor, conteudo, contagem, forte) {
+    const aberta = abertos[chave] !== undefined ? abertos[chave] : !!ABERTAS[chave];
     return h('section', { class: 'mp-sec' + (aberta ? ' aberta' : '') },
       h('button', {
-        type: 'button', class: 'mp-sec-cab',
-        onclick: () => { abertos[chave] = !aberta; LS.set('secoes', abertos); desenhar(); },
+        type: 'button', class: 'mp-sec-cab' + (forte ? ' forte' : ''),
+        onclick: () => { abertos[chave] = !aberta; LS.set('secoes2', abertos); desenhar(); },
       }, h('span', { class: 'mp-caret' }, '›'), h('span', { class: 'mp-dot ' + cor }), h('span', { class: 'mp-sec-tit' }, titulo),
-      contagem !== undefined ? h('span', { class: 'mp-cnt' }, String(contagem)) : null),
+      contagem !== undefined ? h('span', { class: 'mp-cnt' + (chave === 'voce' && contagem ? ' alerta' : '') }, String(contagem)) : null),
       aberta ? conteudo : null);
   }
 
+  const icOk = () => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 16 16'); s.setAttribute('class', 'mp-ico'); s.innerHTML = '<path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="2"/>'; return s; };
+  const botaoNoAr = (it, cheio) => h('button', { type: 'button', class: 'mp-b ok' + (cheio ? ' cheio' : ''), title: 'Já subiu e está funcionando', onclick: () => { conf = it.n; desenhar(); } }, icOk(), 'Já está no ar');
+  const caixaConfirma = it => h('div', { class: 'mp-conf' },
+    h('b', null, `#${it.n} (${curto(it)}) já está no ar?`),
+    h('small', null, it.cliente
+      ? 'É chamado de cliente: ele recebe o aviso "Já está no ar, veja aqui" e o chamado fecha quando ele responder Sim. Sai do painel.'
+      : 'É chamado interno: ele é fechado no GitHub. Sai do painel.'),
+    h('div', { class: 'mp-acoes' },
+      h('button', { type: 'button', class: 'mp-b ok cheio', onclick: () => confirmarNoAr(it) }, icOk(), 'Sim, já está no ar'),
+      h('button', { type: 'button', class: 'mp-b', onclick: () => { conf = null; desenhar(); } }, 'Cancelar')));
+
   function linhaChamado(it, chave) {
-    const temExec = (BOTOES[chave] || []).some(b => b[1] === 'executar');
-    const rc = (estado.receitas || {});
-    const pc = (rc.por_chamado || {})[String(it.n)] || {};
+    const cfg = BOTOES[chave];
+    const entrega = chave === 'exec' && it.entrega && /Entrega pronta/.test(it.meta || '');
     return h('div', { class: 'mp-row' },
       h('a', { class: 'mp-nome', href: urlIssue(it.n), target: '_blank', rel: 'noopener', title: 'Abrir no GitHub' },
         h('b', null, '#' + it.n), ' ', it.nome),
       h('div', { class: 'mp-meta' }, it.meta || ''),
-      h('div', { class: 'mp-acoes' },
-        (BOTOES[chave] || []).map(([t, a, pri]) => h('button', { type: 'button', class: 'mp-b' + (pri ? ' pri' : ''), onclick: () => ACOES[a](it) }, t)),
-        temExec ? h('select', {
-          class: 'mp-sel', title: 'Quem constrói este chamado',
-          onchange: async ev => {
-            const por = Object.assign({}, rc.por_chamado || {});
-            por[String(it.n)] = Object.assign({}, pc, { construir: ev.target.value });
-            await salvarReceitas({ por_chamado: por });
-            toast(`${rotulo(it)}: ${AG[ev.target.value]} vai construir`);
-          },
-        }, Object.entries(AG).map(([k, v]) => h('option', { value: k, selected: (pc.construir || rc.construir_padrao || 'claude') === k }, v))) : null));
+      conf === it.n ? caixaConfirma(it) : h('div', { class: 'mp-acoes' },
+        cfg.ver.map(b => b === 'noar' ? botaoNoAr(it, entrega)
+          : h('button', { type: 'button', class: 'mp-b' + (b[2] && !entrega ? ' pri' : ''), onclick: () => ACOES[b[1]](it) }, b[0])),
+        h('button', { type: 'button', class: 'mp-b mais', title: 'Mais ações', 'aria-label': 'Mais ações', onclick: ev => menuAcoes(ev, it, chave) }, '⋯')));
+  }
+  function listaSecao(chave, itens) {
+    if (!itens.length) return h('div', { class: 'mp-vazio' }, chave === 'testar' ? 'Nada para testar agora.' : 'nada aqui');
+    const todos = LS.get('todos.' + chave, false);
+    const vis = todos ? itens : itens.slice(0, POR_SECAO);
+    return [...vis.map(it => linhaChamado(it, chave)),
+      itens.length > POR_SECAO ? h('button', { type: 'button', class: 'mp-mais', onclick: () => { LS.set('todos.' + chave, !todos); desenhar(); } }, todos ? 'mostrar só ' + POR_SECAO : `ver todos os ${itens.length} →`) : null];
+  }
+  function barraDesfazer() {
+    if (!pend.size) return null;
+    const [n, p] = [...pend.entries()].pop();
+    const seg = Math.max(0, Math.ceil((p.ate - Date.now()) / 1000));
+    return h('div', { class: 'mp-desf' }, icOk(),
+      h('span', null, `#${n} (${curto(p.it)}) ` + (p.it.cliente ? 'marcado como no ar. O cliente será avisado.' : 'vai ser fechado.') + (pend.size > 1 ? ` (+${pend.size - 1})` : '')),
+      h('button', { type: 'button', class: 'mp-desf-b', onclick: () => desfazerNoAr(n) }, `Desfazer ${seg}s`));
+  }
+  function rodapeNoAr() {
+    const L = (estado.no_ar_itens || []).filter(it => !feitos.has(it.n));
+    if (!L.length) return null;
+    const cli = L.filter(x => x.cliente).length, int = L.length - cli;
+    const partes = [];
+    if (cli) partes.push(h('span', null, h('b', null, `${cli} de cliente`), ' esperando ele confirmar (fecham sozinhos em 7 dias)'));
+    if (int) partes.push(h('span', null, h('b', null, `${int} interno${int > 1 ? 's' : ''}`), ' só falta fechar'));
+    return h('div', { class: 'mp-rod' }, h('span', { class: 'mp-dot verde' }),
+      h('span', { class: 'mp-rod-t' }, `${L.length} já estão no ar: `, partes.length > 1 ? [partes[0], ' e ', partes[1]] : partes[0]),
+      h('button', { type: 'button', class: 'mp-b', onclick: () => { vista = 'noar'; marcados = null; desenhar(); } }, 'Ver'));
+  }
+  function desenharNoAr() {
+    const L = ((estado && estado.no_ar_itens) || []).filter(it => !feitos.has(it.n)).sort((a, b) => a.cliente - b.cliente);
+    if (!marcados) marcados = new Set(L.filter(x => !x.cliente).map(x => x.n));
+    const cab = h('div', { class: 'mp-cab' }, abas(),
+      h('div', { class: 'mp-tit' }, h('span', { class: 'mp-ponto' }), `No ar · ${L.length}`, h('button', { type: 'button', class: 'mp-link mp-atu', onclick: () => { vista = 'painel'; desenhar(); } }, '← voltar')),
+      h('div', { class: 'mp-meta' }, 'Os de cliente fecham quando ele confirma no Suporte. Os internos você pode fechar aqui.'));
+    const corpo = h('div', { class: 'mp-corpo' }, L.map(it => h('label', { class: 'mp-chk' + (it.cliente ? ' cli' : '') },
+      h('input', { type: 'checkbox', disabled: it.cliente, checked: !it.cliente && marcados.has(it.n), onchange: ev => { ev.target.checked ? marcados.add(it.n) : marcados.delete(it.n); desenhar(); } }),
+      h('span', null, h('b', null, '#' + it.n), ' ', it.nome, h('span', { class: 'mp-meta', style: 'display:block' }, (it.cliente ? 'de cliente · ' : 'interno · ') + (it.meta || ''))))));
+    const k = [...marcados].filter(n => L.some(x => x.n === n && !x.cliente));
+    const pe = h('div', { class: 'mp-rod' }, h('button', {
+      type: 'button', class: 'mp-b pri', disabled: !k.length, onclick: async () => {
+        if (!confirm(`Fechar ${k.length} chamado(s) interno(s) que já estão no ar?`)) return;
+        await fecharInternos(k); vista = 'painel'; desenhar();
+      },
+    }, k.length ? `Fechar os ${k.length} internos marcados` : 'Nenhum interno marcado'));
+    painel.replaceChildren(cab, corpo, pe);
   }
 
   function abas() {
@@ -208,6 +346,7 @@
   function desenhar() {
     if (!painel) return;
     if (LS.get('aba', 'painel') === 'pergunta') { desenharPergunta(); return; }
+    if (vista === 'noar' && estado) { desenharNoAr(); return; }
     const cab = h('div', { class: 'mp-cab' }, abas(),
       h('div', { class: 'mp-tit' }, h('span', { class: 'mp-ponto' }), 'Painel Maestro',
         h('span', { class: 'mp-atu' }, estado ? 'atualizado ' + estado.atualizado : ''),
@@ -227,6 +366,13 @@
       corpo.appendChild(h('div', { class: 'mp-vazio' }, erro ? 'Não consegui ler o painel: ' + erro : 'Carregando…'));
     } else {
       if (erro) corpo.appendChild(h('div', { class: 'mp-vazio erro' }, 'Última leitura falhou: ' + erro));
+      const porChave = Object.fromEntries((estado.grupos || []).map(g => [g.chave, g.itens || []]));
+      const fase = ([chave, titulo, cor]) => {
+        const itens = (porChave[chave] || []).filter(filtroOk).filter(it => !escondido(it.n));
+        corpo.appendChild(secao(chave, titulo, cor, listaSecao(chave, itens), itens.length, ['voce', 'testar', 'exec'].includes(chave)));
+      };
+      // Primeiro o que precisa de você
+      SECOES.slice(0, 3).forEach(fase);
       // Agentes trabalhando agora
       const ag = estado.agentes || [];
       corpo.appendChild(secao('agentes', 'Agentes trabalhando agora', 'pulsando', ag.length ? ag.map(a => h('div', { class: 'mp-row' },
@@ -250,20 +396,20 @@
           h('button', { type: 'button', class: 'mp-b pri', onclick: () => window.open(f.url, '_blank', 'noopener') }, 'Abrir'),
           h('button', { type: 'button', class: 'mp-b', onclick: () => { navigator.clipboard.writeText(f.url).then(() => toast('Link copiado')); } }, 'Copiar link')))) :
         h('div', { class: 'mp-vazio' }, 'Nenhum arquivo recente'), arq.length));
-      // Chamados por fase
-      const porChave = Object.fromEntries((estado.grupos || []).map(g => [g.chave, g.itens || []]));
-      for (const [chave, titulo, cor] of SECOES) {
-        const itens = (porChave[chave] || []).filter(filtroOk);
-        const lim = LS.get('lim.' + chave, 5);
-        const conteudo = itens.length ? [
-          ...itens.slice(0, lim).map(it => linhaChamado(it, chave)),
-          itens.length > lim ? h('button', { type: 'button', class: 'mp-mais', onclick: () => { LS.set('lim.' + chave, lim + 20); desenhar(); } }, `ver mais ${Math.min(20, itens.length - lim)} de ${itens.length - lim} →`) : null,
-        ] : h('div', { class: 'mp-vazio' }, 'nada aqui');
-        corpo.appendChild(secao(chave, titulo, cor, conteudo, itens.length));
-      }
-      if (estado.no_ar) corpo.appendChild(h('div', { class: 'mp-vazio rodape' }, `${estado.no_ar} chamados já no ar, só falta fechar`));
+      SECOES.slice(3).forEach(fase);
+      const rod = rodapeNoAr();
+      if (rod) corpo.appendChild(rod);
     }
-    painel.replaceChildren(cab, corpo);
+    const velho = painel.querySelector('.mp-corpo');
+    const rolagem = velho ? velho.scrollTop : 0;
+    painel.replaceChildren(...[cab, corpo, barraDesfazer()].filter(Boolean));
+    corpo.scrollTop = rolagem;
+    clearInterval(tique);
+    if (pend.size) tique = setInterval(() => {
+      const b = painel.querySelector('.mp-desf-b'); const ult = [...pend.values()].pop();
+      if (!b || !ult) { clearInterval(tique); return; }
+      b.textContent = `Desfazer ${Math.max(0, Math.ceil((ult.ate - Date.now()) / 1000))}s`;
+    }, 500);
   }
 
   async function abrirSessao(sid) {

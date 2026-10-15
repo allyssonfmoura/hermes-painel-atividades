@@ -10,23 +10,28 @@ Código: este repositório (`allyssonfmoura/hermes-painel-atividades`), clonado 
 - Selo de ambiente no topo: verde "Você está na VPS · online 24h" (no celular só "VPS"); menu explica VPS x Mac.
 - Botão 💬 no topo: abre a Pergunta rápida (tela cheia no celular).
 - Painel da direita (ícone "Painel Maestro" na barra de ícones): abas **Painel** e **Pergunta rápida**.
-  - Painel: Agentes trabalhando agora, Arquivos saindo, Para você testar, Esperando você, Sendo atendidos,
-    Ainda não analisados, Na fila; filtro por cliente; "Quem constrói" (padrão e por chamado); botões de ação.
+  - Painel (15/10, prancha painel-ja-no-ar aprovada): Esperando você, Para você testar e Sendo atendidos
+    abertos no topo; depois Agentes, Arquivos, Na fila, Ainda não analisados (fechados). 3 itens por seção
+    + "ver todos". Botões visíveis; extras (Executar, Para a fila, Quem constrói, GitHub) no menu ⋯.
+    Botão **Já está no ar**: confirma no painel, some, e só manda após 10 s (Desfazer). Chamado de cliente
+    (SUP-/origem: Suporte) ganha `estado: no ar` (Maestro avisa o cliente; fecha no "Sim" ou em 7 dias);
+    interno ganha a etiqueta e é fechado. Rodapé separa no ar de cliente x internos; "Ver" fecha internos.
+    Painel com 340 px (app e WebUI).
   - Pergunta rápida: responde em ~10 s, opcionalmente com o assunto da conversa aberta, sem entrar no histórico.
 - Tela **Agentes** (ícone de robô): quem paga cada agente (assinatura x API) + montar equipe por receitas.
 - Faixa **Memória da conversa** acima da caixa de mensagem (verde/amarelo/vermelho; vermelho = limite de
   compressão automática, hoje 50%) + botão **Renovar contexto** (resume e continua na mesma janela).
 - Barra de conversas: abas "🌐 Navegador" e "💻 App e outros", filtros Origem e Cliente, Projetos chamados de "Grupos".
 
-**App do Mac** — plugin `painel-atividades` 2.0 (`desktop/plugin.js`). Mesmas funções: aba Maestro à direita,
+**App do Mac** — plugin `painel-atividades` 2.1 (`desktop/plugin.js`). Mesmas funções: aba Maestro à direita,
 página Agentes no menu, selo de ambiente, faixa de memória. Instalação é passo do Allysson:
 Recursos → Plugins → Instalar do Git → `allyssonfmoura/hermes-painel-atividades` (Interface do desktop),
 ou o link `hermes://plugin/install?repo=allyssonfmoura/hermes-painel-atividades`.
-Ainda NÃO confirmado na tela dele (só testado em simulador com dados reais).
+Confirmado pelo Allysson em 14/10/2026: instalado e funcionando bem no app do Mac. Ajustes virão em breve.
 
 **Serviço auxiliar** — systemd `hermes-painel-sidecar`, 127.0.0.1:8796, só via
 `/api/extensions/maestro-painel/sidecar/<rota>` com token (token-v1). Rotas: `/estado`, `/agentes`,
-`/acao` (fila/tirar = rótulo `estado:` no GitHub), `/parar`, `/receitas`, `/pergunta`, `/pergunta/<id>`.
+`/acao` (fila/tirar = rótulo `estado:`; no_ar; fechar ns[]), `/parar`, `/receitas`, `/pergunta`, `/pergunta/<id>`.
 O app do Mac chega nele por `shell.exec` + curl. Resposta sempre em ASCII (acentos escapados).
 
 **Outras mudanças feitas**
@@ -44,6 +49,6 @@ O app do Mac chega nele por `shell.exec` + curl. Resposta sempre em ASCII (acent
   (ver skill `hermes-user-customization`).
 
 ## Ideias e pendências
-- Confirmar o plugin instalado no app do Mac (print dele).
+- Ajustes no plugin do app do Mac (ele vai dizer quais).
 - Ele disse "daqui a pouco a gente pode melhorar mais" — perguntar o que incomoda primeiro.
 - Prancha antes de qualquer mudança de tela (regra dele).
