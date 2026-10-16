@@ -3,9 +3,14 @@
     {
       "id": "maestro-painel",
       "name": "Painel Maestro",
-      "description": "Painel fixo com chamados, agentes e arquivos; aviso de ambiente; filtros da barra de conversas; tela de Agentes.",
-      "scripts": ["assets/painel.js"],
-      "stylesheets": ["assets/painel.css"],
+      "description": "Painel fixo com chamados, agentes e arquivos; aviso de ambiente; filtros da barra de conversas; tela de Agentes. Escritório dos agentes no rodapé da barra de conversas; clicar na tarefa abre o chat dela.",
+      "scripts": [
+        "assets/painel.js",
+        "assets/escritorio.js"
+      ],
+      "stylesheets": [
+        "assets/painel.css"
+      ],
       "sidecar": {
         "type": "loopback",
         "origin": "http://127.0.0.1:8796",

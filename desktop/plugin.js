@@ -4,6 +4,8 @@
 //  • selo de ambiente no topo (VPS online x Mac local)
 //  • faixa "Memória da conversa" + botão Renovar contexto, acima da caixa de mensagem
 //  • chat com o agente trabalhando: fixado no topo da lista, fundo verde e ponto pulsando
+//  • escritório dos agentes no canto inferior esquerdo (menu das seções recolhido no ☰)
+//  • clicar numa tarefa abre o chat dela (‹ 1 de N › para os outros), não o GitHub
 // Dados e ações: serviço auxiliar da VPS (127.0.0.1:8796), alcançado pelo gateway do Hermes
 // com host.request('shell.exec'). Funciona quando o app está ligado à VPS.
 import { host, useValue } from '@hermes/plugin-sdk'
@@ -171,6 +173,23 @@ const CSS = `
 [data-mpd-rodando]:hover::after{display:none}
 @keyframes mpdPulso{0%{box-shadow:0 0 0 0 rgba(63,182,122,.6)}70%{box-shadow:0 0 0 7px rgba(63,182,122,0)}100%{box-shadow:0 0 0 0 rgba(63,182,122,0)}}
 @media (prefers-reduced-motion:reduce){[data-mpd-rodando]::after{animation:none}}
+.mpd-chatlinha{display:flex;align-items:center;gap:6px;margin-top:3px;min-width:0}
+.mpd-navchat{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--bd);border-radius:7px;padding:0 2px;font-size:.66rem;color:var(--tx2)}
+.mpd-navchat b{padding:0 3px;font-weight:600;color:var(--tx)}
+.mpd-navchat button{font:inherit;font-size:.85rem;line-height:1;background:none;border:0;color:var(--tx2);cursor:pointer;padding:2px 5px;border-radius:5px}
+.mpd-navchat button:hover:not(:disabled){background:var(--hov);color:var(--tx)}
+.mpd-navchat button:disabled{opacity:.3;cursor:default}
+.mpd-chatq{font:inherit;font-size:.68rem;background:none;border:0;padding:2px 4px;border-radius:5px;cursor:pointer;color:var(--ac);min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left}
+.mpd-chatq:hover{background:var(--hov)}
+.mpd-novochat{font:inherit;font-size:.66rem;background:none;border:0;padding:0 0 0 6px;cursor:pointer;color:var(--ac);white-space:nowrap}
+.mpd-novochat:hover{text-decoration:underline}
+[data-mpd-pisca]{animation:mpdPisca 1.2s ease 3}
+@keyframes mpdPisca{50%{background:color-mix(in srgb,var(--theme-primary,#7aa2ff) 28%,transparent)}}
+ul[data-mpd-nav="fechado"] > li[data-sidebar="menu-item"]:not(.mpd-ham){display:none}
+.mpd-ham-b{display:flex;align-items:center;gap:8px;width:100%;height:30px;padding:0 8px;border-radius:7px;border:0;background:none;color:var(--ui-text-secondary);font:inherit;font-size:.8rem;cursor:pointer;text-align:left}
+.mpd-ham-b:hover{background:var(--ui-control-hover-background,rgba(127,127,127,.08));color:var(--ui-text-primary)}
+.mpd-ham-b svg{flex:0 0 16px;opacity:.75}
+.mpd-ham-b small{margin-left:auto;font-size:.66rem;color:var(--ui-text-tertiary)}
 `
 // Sempre troca o conteúdo: depois de reinstalar o plugin, o estilo da versão anterior
 // continuava na página e o painel novo aparecia com o visual velho.
@@ -190,7 +209,7 @@ const h = (tag, attrs, ...filhos) => {
     else if (k.startsWith('on')) el.addEventListener(k.slice(2), v)
     else el.setAttribute(k, v === true ? '' : v)
   }
-  for (const f of filhos.flat()) {
+  for (const f of filhos.flat(3)) {
     if (f === null || f === undefined || f === false) continue
     el.appendChild(typeof f === 'string' || typeof f === 'number' ? document.createTextNode(String(f)) : f)
   }
@@ -401,9 +420,20 @@ function montarPainel(raiz) {
     const salvar = async k => { const por = Object.assign({}, rc.por_chamado || {}); por[String(it.n)] = Object.assign({}, por[String(it.n)] || {}, { construir: k }); await salvarReceitas({ por_chamado: por }); aviso(`${rotulo(it)}: ${AG[k]} vai construir`) }
     const cfg = BOTOES[chave]
     const entrega = chave === 'exec' && it.entrega && /Entrega pronta/.test(it.meta || '')
+    const chats = chatsDe(it.n)
+    const idx = Math.min(IDX_CHAT.get(it.n) || 0, Math.max(0, chats.length - 1))
+    const tarefa = `#${it.n} (${((G.estado && G.estado.efeitos) || {})[String(it.n)] || curto(it)})`
     return h('div', { class: 'mpd-row' },
-      h('button', { type: 'button', class: 'mpd-nome', title: 'Abrir no GitHub', onclick: () => abrirExterno(urlIssue(it.n)) }, h('b', null, '#' + it.n), it.nome),
-      h('div', { class: 'mpd-meta' }, it.meta || ''),
+      h('button', { type: 'button', class: 'mpd-nome', title: chats.length ? 'Abrir o chat desta tarefa' : 'Abrir um chat novo para esta tarefa', onclick: () => abrirTarefa({ n: it.n, tarefa, idx }) }, h('b', null, '#' + it.n), it.nome),
+      h('div', { class: 'mpd-meta' }, it.meta || '',
+        chats.length ? null : h('button', { type: 'button', class: 'mpd-novochat', title: 'Abre um chat novo para ' + tarefa, onclick: () => abrirTarefa({ n: it.n, tarefa }) }, '＋ Novo chat')),
+      chats.length ? h('div', { class: 'mpd-chatlinha' },
+        chats.length > 1 ? h('span', { class: 'mpd-navchat' },
+          h('button', { type: 'button', title: 'Chat anterior', 'aria-label': 'Chat anterior', disabled: idx >= chats.length - 1, onclick: () => trocarChat(it.n, +1) }, '‹'),
+          h('b', null, `${idx + 1} de ${chats.length}`),
+          h('button', { type: 'button', title: 'Chat mais novo', 'aria-label': 'Chat mais novo', disabled: idx <= 0, onclick: () => trocarChat(it.n, -1) }, '›')) : null,
+        h('button', { type: 'button', class: 'mpd-chatq', title: 'Abrir: ' + chats[idx].titulo, onclick: () => abrirTarefa({ n: it.n, tarefa, idx }) },
+          '💬 ' + (chats[idx].titulo.split(' · ')[1] || 'chat') + (chats[idx].quando ? ' · ' + chats[idx].quando : ''))) : null,
       G.conf === it.n ? caixaConfirma(it) : h('div', { class: 'mpd-acoes' },
         cfg.ver.map(b => b === 'noar' ? botaoNoAr(it, entrega)
           : h('button', { type: 'button', class: 'mpd-b' + (b[2] && !entrega ? ' pri' : ''), onclick: () => ACOES[b[1]](it) }, b[0])),
@@ -773,6 +803,260 @@ function RodandoNoTopo() {
   return jsx('span', { style: { display: 'none' } })
 }
 
+// ── chat de cada tarefa (clique na tarefa abre o chat, não o GitHub) ──────────
+// O app só abre conversas que estão no state.db da VPS (app, Telegram, cópias do navegador).
+const IDX_CHAT = new Map()
+const chatsDe = n => chatsDaTarefa((G.estado && G.estado.chats) || (ESC.dados && ESC.dados.chats), n, true)
+function piscarChat(titulo) {
+  let k = 0
+  const t = setInterval(() => {
+    const row = [...document.querySelectorAll('.row-hover')].find(r => ((r.querySelector('.hover-marquee') || {}).textContent || '').trim() === titulo)
+    if (row || ++k > 20) {
+      clearInterval(t)
+      if (!row) return
+      try { row.scrollIntoView({ block: 'nearest', behavior: 'smooth' }) } catch (_) {}
+      row.removeAttribute('data-mpd-pisca'); void row.offsetWidth; row.setAttribute('data-mpd-pisca', '')
+      setTimeout(() => row.removeAttribute('data-mpd-pisca'), 4000)
+    }
+  }, 150)
+}
+async function abrirChat(c) {
+  try { await host.openSession(c.sid); piscarChat(c.titulo) } catch (_) { aviso('Essa conversa não abre aqui no app', true) }
+}
+function trocarChat(n, passo) {
+  const L = chatsDe(n)
+  const i = Math.max(0, Math.min(L.length - 1, (IDX_CHAT.get(n) || 0) + passo))
+  IDX_CHAT.set(n, i)
+  avisar()
+  if (L[i]) abrirChat(L[i])
+}
+// {n, sid?, tarefa, idx?}: abre o chat certo; sem chat, abre um novo com "Sobre a Solicitação #N (efeito): "
+// escrito (o renomeador da VPS dá o nome "#N (efeito) · ação" assim que ele enviar).
+async function abrirTarefa(a) {
+  const L = a.n ? chatsDe(a.n) : []
+  if (a.sid) {
+    const c = L.find(x => x.sid === a.sid) || { sid: a.sid, titulo: '' }
+    return abrirChat(c)
+  }
+  if (!a.n) return
+  if (L.length) return abrirChat(L[Math.min(a.idx || 0, L.length - 1)])
+  try {
+    host.newChat()
+    await new Promise(ok => setTimeout(ok, 500))
+    await host.composer.setDraft(null, `Sobre a Solicitação ${a.tarefa || '#' + a.n}: `)
+    host.composer.focus(null)
+  } catch (e) { aviso('Não consegui abrir o chat novo: ' + (e.message || e), true) }
+}
+
+// ── escritório dos agentes no canto inferior esquerdo + menu recolhido ───────
+/* ESCRITORIO-CORE-INICIO */
+const ESC_CSS = `
+.esc-caixa{flex-shrink:0;margin:6px 8px 8px;border:1px solid var(--esc-borda);border-radius:12px;background:var(--esc-fundo);padding:7px 7px 6px;font-size:12px;color:var(--esc-t1);
+  --esc-borda:var(--ui-border-subtle,var(--border,rgba(127,127,127,.25)));--esc-fundo:var(--ui-control-background,rgba(127,127,127,.06));
+  --esc-t1:var(--ui-text-primary,var(--text,#ececec));--esc-t2:var(--ui-text-secondary,var(--muted,#b8b8b8));--esc-t3:var(--ui-text-tertiary,var(--muted,#7d7d7d));
+  --esc-mesa:var(--ui-control-hover-background,rgba(127,127,127,.09));--esc-ok:#3ccf78;--esc-vazia:rgba(127,127,127,.25)}
+.esc-cab{display:flex;align-items:center;gap:6px;padding:0 3px 6px;cursor:pointer;user-select:none;background:none;border:0;width:100%;color:inherit;font:inherit;text-align:left}
+.esc-cab .esc-tit{font-size:.64rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--esc-t3);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.esc-cab .esc-car{font-size:10px;color:var(--esc-t3);transition:transform .15s}
+.esc-caixa.min .esc-car{transform:rotate(-90deg)}
+.esc-caixa.min .esc-cab{padding-bottom:0}
+.esc-pontos{display:flex;gap:3px}.esc-pontos i{width:6px;height:6px;border-radius:50%;background:var(--c);animation:esc-pul 1.2s infinite}
+.esc-chao{display:grid;grid-template-columns:1fr 1fr;gap:6px;max-height:330px;overflow-y:auto}
+.esc-caixa.min .esc-chao,.esc-caixa:not(.min) .esc-pontos{display:none}
+.esc-vazio{font-size:.7rem;color:var(--esc-t3);padding:2px 4px 3px}
+.esc-mesa{position:relative;border-radius:9px;padding:6px 7px 7px;background:var(--esc-mesa);border:1px solid transparent;cursor:pointer;text-align:left;color:inherit;font:inherit;min-width:0;display:block;width:100%}
+.esc-mesa:hover{border-color:var(--esc-borda)}
+.esc-mesa:focus-visible{outline:2px solid var(--c);outline-offset:1px}
+.esc-cena{height:44px;position:relative;margin-bottom:4px}
+.esc-bon{position:absolute;left:6px;bottom:6px;width:20px;height:30px}
+.esc-cabeca{position:absolute;left:4px;top:0;width:12px;height:12px;border-radius:50%;background:var(--c);animation:esc-bal 1.6s ease-in-out infinite}
+.esc-corpo{position:absolute;left:2px;top:12px;width:16px;height:14px;border-radius:6px 6px 3px 3px;background:var(--c);opacity:.75}
+.esc-braco{position:absolute;left:14px;top:15px;width:9px;height:3px;border-radius:2px;background:var(--c);transform-origin:left;animation:esc-dig .35s ease-in-out infinite alternate}
+.esc-tampo{position:absolute;left:0;right:0;bottom:2px;height:5px;border-radius:2px;background:#5a4632;opacity:.8}
+.esc-tela{position:absolute;left:28px;bottom:7px;width:30px;height:20px;border-radius:3px;background:#0b0b0d;border:1px solid #3b3b44;overflow:hidden}
+.esc-tela:after{content:"";position:absolute;left:3px;top:3px;height:2px;width:50%;background:var(--c);opacity:.85;box-shadow:0 4px 0 var(--c),0 8px 0 var(--c);animation:esc-cod 1.4s steps(3) infinite}
+.esc-balao{position:absolute;right:0;top:0;max-width:64px;font-size:.58rem;line-height:1.2;color:#111;background:#e9e9ee;border-radius:7px 7px 7px 2px;padding:2px 5px;font-weight:700;white-space:nowrap}
+.esc-balao:after{content:"";position:absolute;left:-3px;bottom:2px;border:3px solid transparent;border-right-color:#e9e9ee}
+.esc-qtd{position:absolute;left:30px;top:0;font-size:.58rem;font-weight:700;color:var(--c)}
+.esc-ag{font-size:.62rem;color:var(--c);font-weight:600;display:flex;align-items:center;gap:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.esc-ag:before{content:"";flex:0 0 5px;height:5px;border-radius:50%;background:var(--c);animation:esc-pul 1.2s infinite}
+.esc-tar{font-size:.68rem;color:var(--esc-t1);margin-top:2px;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.esc-pas{font-size:.6rem;color:var(--esc-t3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.esc-prog{display:flex;gap:2px;margin-top:5px}
+.esc-prog b{flex:1;height:4px;border-radius:2px;background:var(--esc-vazia);position:relative;overflow:hidden}
+.esc-prog b.f{background:var(--esc-ok)}
+.esc-prog b.a{background:linear-gradient(90deg,var(--esc-ok) 0 var(--p),var(--esc-vazia) var(--p))}
+.esc-prog b.a:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.45),transparent);animation:esc-bri 1.8s infinite;transform:translateX(-100%)}
+.esc-etq{display:flex;justify-content:space-between;font-size:.52rem;color:var(--esc-t3);margin-top:2px}
+.esc-etq .on{color:var(--esc-t1);font-weight:600}
+.esc-mesa.parado .esc-braco,.esc-mesa.parado .esc-cabeca,.esc-mesa.parado .esc-tela:after,.esc-mesa.parado .esc-ag:before,.esc-mesa.parado .esc-prog b.a:after{animation:none}
+.esc-mesa.parado .esc-tela:after,.esc-mesa.parado .esc-ag:before{opacity:.3}
+.esc-mais{grid-column:1/-1;font-size:.64rem;color:var(--esc-t3);background:none;border:0;padding:2px;cursor:pointer;font:inherit}
+/* faixa (celular): mesas pequenas rolando para o lado */
+.esc-caixa.faixa{margin:0 0 6px}
+.esc-caixa.faixa .esc-pontos{display:none}
+.esc-caixa.faixa .esc-car{transform:rotate(180deg)}.esc-caixa.faixa.aberta .esc-car{transform:none}
+.esc-caixa.faixa:not(.aberta) .esc-chao{display:flex;overflow-x:auto;overflow-y:hidden;max-height:none;scrollbar-width:none}
+.esc-caixa.faixa:not(.aberta) .esc-mesa{flex:0 0 150px}
+.esc-caixa.faixa:not(.aberta) .esc-cena,.esc-caixa.faixa:not(.aberta) .esc-pas,.esc-caixa.faixa:not(.aberta) .esc-etq{display:none}
+.esc-caixa.faixa:not(.aberta) .esc-tar{-webkit-line-clamp:1}
+.esc-caixa.faixa.aberta .esc-chao{max-height:55vh}
+@keyframes esc-dig{to{transform:rotate(14deg) translateY(1px)}}
+@keyframes esc-bal{50%{transform:translateY(-1px)}}
+@keyframes esc-cod{0%{width:30%}50%{width:70%}100%{width:50%}}
+@keyframes esc-pul{50%{opacity:.25}}
+@keyframes esc-bri{to{transform:translateX(100%)}}
+@media (prefers-reduced-motion:reduce){.esc-caixa *{animation:none!important}}
+`;
+const ESC_COR = { claude: '#f0a060', codex: '#5fd0c8', hermes: '#b48cff', publicacao: '#7aa2ff' };
+const ESC_NOME = { claude: 'Claude', codex: 'Codex', hermes: 'Hermes', publicacao: 'Publicação' };
+const ESC_ETQ = ['Plan.', 'Constr.', 'Rev.', 'Test.', 'Publ.'];
+const ESC_ETAPAS = ['Planejar', 'Construir', 'Revisar', 'Testar', 'Publicar'];
+const ESC_MAX = 6;
+
+function escVerbo(m) {
+  if (m.agente === 'claude') return 'construindo';
+  if (m.agente === 'codex') return 'revisando';
+  if (m.agente === 'publicacao') return m.ativo ? 'publicando' : 'esperando você';
+  return m.n ? (['planejando', 'acompanhando', 'revisando', 'testando', 'publicando'][m.etapa] || 'trabalhando') : 'conversando';
+}
+
+/* criarEscritorio({h, lsGet, lsSet, abrirMesa(m), faixa}) -> {el, desenhar(dados)} */
+function criarEscritorio(o) {
+  const h = o.h;
+  const caixa = h('div', { class: 'esc-caixa' + (o.faixa ? ' faixa' : '') + (o.lsGet('esc.min', false) ? ' min' : '') });
+  let ultimo = '';
+  let todos = false;
+  function alternar() {
+    if (caixa.classList.contains('faixa')) { caixa.classList.toggle('aberta'); return; }
+    const min = !caixa.classList.contains('min');
+    caixa.classList.toggle('min', min);
+    o.lsSet('esc.min', min);
+  }
+  function mesa(m) {
+    const cor = ESC_COR[m.agente] || '#999';
+    const tit = `${ESC_NOME[m.agente] || m.agente}${m.qtd > 1 ? ' ×' + m.qtd : ''} · ${escVerbo(m)}` +
+      `\n${m.tarefa}${m.passo ? '\n' + m.passo : ''}${m.tempo ? '\nhá ' + m.tempo : ''}` +
+      (m.etapa !== null && m.etapa !== undefined ? `\nEtapa: ${ESC_ETAPAS[m.etapa]} (estimativa ${m.pct}%)` : '') +
+      '\nClique para abrir o chat';
+    const prog = (m.etapa === null || m.etapa === undefined) ? null : [
+      h('div', { class: 'esc-prog' }, ESC_ETAPAS.map((_, i) => h('b', {
+        class: i < m.etapa ? 'f' : i === m.etapa ? 'a' : '', style: i === m.etapa ? `--p:${m.pct}%` : null,
+      }))),
+      h('div', { class: 'esc-etq' }, ESC_ETQ.map((t, i) => h('span', { class: i === m.etapa ? 'on' : '' }, t))),
+    ];
+    return h('button', {
+      type: 'button', class: 'esc-mesa' + (m.ativo ? '' : ' parado'), style: `--c:${cor}`, title: tit,
+      'aria-label': tit.replace(/\n/g, '. '), onclick: () => o.abrirMesa(m),
+    },
+    h('div', { class: 'esc-cena' },
+      h('div', { class: 'esc-bon' }, h('div', { class: 'esc-cabeca' }), h('div', { class: 'esc-corpo' }), h('div', { class: 'esc-braco' })),
+      h('div', { class: 'esc-tela' }), h('div', { class: 'esc-tampo' }),
+      m.qtd > 1 ? h('span', { class: 'esc-qtd' }, '×' + m.qtd) : null,
+      m.n ? h('div', { class: 'esc-balao' }, '#' + m.n) : null),
+    h('div', { class: 'esc-ag' }, `${ESC_NOME[m.agente] || m.agente} · ${escVerbo(m)}`),
+    h('div', { class: 'esc-tar' }, m.tarefa),
+    h('div', { class: 'esc-pas' }, m.passo || ''),
+    prog);
+  }
+  function desenhar(d) {
+    const mesas = (d && d.mesas) || [];
+    const chave = JSON.stringify([mesas.map(m => [m.agente, m.n, m.qtd, m.ativo, m.tarefa, m.passo, m.etapa, m.pct]), todos, !!(d && d.erro)]);
+    if (chave === ultimo) return;
+    ultimo = chave;
+    const ativos = mesas.filter(m => m.ativo).length;
+    const titulo = !d ? 'Escritório · carregando' : d.erro ? 'Escritório · sem conexão' :
+      mesas.length ? `Escritório · ${ativos} trabalhando` + (mesas.length > ativos ? ` · ${mesas.length - ativos} esperando` : '') : 'Escritório vazio';
+    const cab = h('button', { type: 'button', class: 'esc-cab', title: o.faixa ? 'Tocar para abrir ou fechar' : 'Recolher ou abrir o escritório', onclick: alternar },
+      h('span', { class: 'esc-car' }, '▾'), h('span', { class: 'esc-tit' }, titulo),
+      h('span', { class: 'esc-pontos' }, mesas.slice(0, 8).map(m => h('i', { style: `--c:${ESC_COR[m.agente] || '#999'}` }))));
+    caixa.classList.toggle('vazio', !mesas.length);
+    if (!mesas.length) { caixa.replaceChildren(cab); return; }
+    const vis = todos ? mesas : mesas.slice(0, ESC_MAX);
+    caixa.replaceChildren(cab, h('div', { class: 'esc-chao' }, vis.map(mesa),
+      mesas.length > ESC_MAX ? h('button', { type: 'button', class: 'esc-mais', onclick: () => { todos = !todos; desenhar(d); } },
+        todos ? 'mostrar menos' : `+ ${mesas.length - ESC_MAX} mesas`) : null));
+  }
+  return { el: caixa, desenhar };
+}
+
+/* Chat de uma tarefa: o mais recente que esta tela consegue abrir (app só abre os do state.db). */
+function chatsDaTarefa(chats, n, soApp) {
+  const l = ((chats || {})[String(n)] || []);
+  return soApp ? l.filter(c => c.app) : l;
+}
+/* ESCRITORIO-CORE-FIM */
+const ESC = { dados: null, esc: null }
+function barraEsquerda() {
+  return document.querySelector('[data-tour="sessions-sidebar"] [data-sidebar="content"]')
+}
+function menuDeSecoes() {
+  const marca = document.querySelector('[data-tour="sessions-sidebar"] [data-tour^="sidebar-nav-"]')
+  return marca ? marca.closest('ul[data-sidebar="menu"]') : null
+}
+const IC_MENU = () => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 16 16'); s.setAttribute('width', '16'); s.setAttribute('height', '16'); s.innerHTML = '<path d="M2.5 4h11M2.5 8h11M2.5 12h11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none"/>'; return s }
+function recolherMenu() {
+  const ul = menuDeSecoes()
+  if (!ul) return
+  let li = ul.querySelector(':scope > li.mpd-ham')
+  if (!li) {
+    const b = h('button', { type: 'button', class: 'mpd-ham-b', title: 'Mostrar ou esconder as seções (Nova sessão, Recursos…)' }, IC_MENU(), h('span', { class: 'mpd-ham-t' }, 'Menu'), h('small', null, ''))
+    li = h('li', { 'data-sidebar': 'menu-item', class: 'mpd-ham' }, b)
+    b.addEventListener('click', ev => { ev.stopPropagation(); const ab = ul.getAttribute('data-mpd-nav') !== 'aberto'; ul.setAttribute('data-mpd-nav', ab ? 'aberto' : 'fechado'); pintar() })
+    ul.insertBefore(li, ul.firstChild)
+    // escolher uma seção fecha o menu
+    ul.addEventListener('click', ev => { if (!li.contains(ev.target) && ul.getAttribute('data-mpd-nav') === 'aberto') setTimeout(() => { ul.setAttribute('data-mpd-nav', 'fechado'); pintar() }, 120) })
+  } else if (ul.firstChild !== li) ul.insertBefore(li, ul.firstChild)
+  if (!ul.hasAttribute('data-mpd-nav')) ul.setAttribute('data-mpd-nav', 'fechado')
+  function pintar() {
+    const ab = ul.getAttribute('data-mpd-nav') === 'aberto'
+    const t = li.querySelector('.mpd-ham-t'); if (t) t.textContent = ab ? 'Fechar menu' : 'Menu'
+    const sm = li.querySelector('small'); if (sm) sm.textContent = ab ? '' : 'Nova sessão, Recursos…'
+  }
+  pintar()
+}
+function fecharMenuFora(ev) {
+  const ul = menuDeSecoes()
+  if (ul && ul.getAttribute('data-mpd-nav') === 'aberto' && !ul.contains(ev.target)) {
+    ul.setAttribute('data-mpd-nav', 'fechado')
+    const t = ul.querySelector('.mpd-ham-t'); if (t) t.textContent = 'Menu'
+    const sm = ul.querySelector('.mpd-ham small'); if (sm) sm.textContent = 'Nova sessão, Recursos…'
+  }
+}
+function encaixarEscritorio() {
+  const lado = barraEsquerda()
+  if (!lado || !ESC.esc) return
+  if (ESC.esc.el.parentNode !== lado || lado.lastElementChild !== ESC.esc.el) lado.appendChild(ESC.esc.el)
+}
+function EscritorioNoCanto() {
+  useEffect(() => {
+    injetarCss()
+    let s = document.getElementById('esc-css')
+    if (!s) { s = document.createElement('style'); s.id = 'esc-css'; document.head.appendChild(s) }
+    if (s.textContent !== ESC_CSS) s.textContent = ESC_CSS
+    if (!ESC.esc) ESC.esc = criarEscritorio({ h, lsGet: LS.get, lsSet: LS.set, abrirMesa: m => abrirTarefa({ n: m.n, sid: m.sid, tarefa: m.tarefa }), faixa: false })
+    ESC.esc.desenhar(ESC.dados)
+    let vivo = true
+    const ler = async () => {
+      try { ESC.dados = await sc('escritorio') } catch (_) { ESC.dados = Object.assign({}, ESC.dados || { mesas: [] }, { erro: true }) }
+      if (vivo) { ESC.esc.desenhar(ESC.dados); encaixarEscritorio() }
+    }
+    ler()
+    const t1 = setInterval(() => { if (!document.hidden) ler() }, 12000)
+    const t2 = setInterval(() => { encaixarEscritorio(); recolherMenu() }, 1200)
+    encaixarEscritorio(); recolherMenu()
+    document.addEventListener('mousedown', fecharMenuFora, true)
+    return () => {
+      vivo = false; clearInterval(t1); clearInterval(t2)
+      document.removeEventListener('mousedown', fecharMenuFora, true)
+      if (ESC.esc && ESC.esc.el.parentNode) ESC.esc.el.remove()
+      const ul = menuDeSecoes()
+      if (ul) { ul.removeAttribute('data-mpd-nav'); const li = ul.querySelector(':scope > li.mpd-ham'); if (li) li.remove() }
+    }
+  }, [])
+  return jsx('span', { style: { display: 'none' } })
+}
+
 export default {
   id: 'painel-atividades',
   name: 'Painel Maestro',
@@ -785,6 +1069,7 @@ export default {
       { id: 'ambiente', area: 'titleBar.left', order: 90, render: () => jsx(Ambiente, {}) },
       { id: 'memoria', area: 'composer.top', order: 10, render: () => jsx(Memoria, {}) },
       { id: 'rodando', area: 'titleBar.left', order: 91, render: () => jsx(RodandoNoTopo, {}) },
+      { id: 'escritorio', area: 'titleBar.left', order: 92, render: () => jsx(EscritorioNoCanto, {}) },
     ])
   },
 }

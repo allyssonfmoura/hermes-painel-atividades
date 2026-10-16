@@ -279,10 +279,23 @@
   function linhaChamado(it, chave) {
     const cfg = BOTOES[chave];
     const entrega = chave === 'exec' && it.entrega && /Entrega pronta/.test(it.meta || '');
+    const chats = chatsDe(it.n);
+    const idx = Math.min(idxChat.get(it.n) || 0, Math.max(0, chats.length - 1));
+    const tarefa = `#${it.n} (${((estado && estado.efeitos) || {})[String(it.n)] || curto(it)})`;
     return h('div', { class: 'mp-row' },
-      h('a', { class: 'mp-nome', href: urlIssue(it.n), target: '_blank', rel: 'noopener', title: 'Abrir no GitHub' },
-        h('b', null, '#' + it.n), ' ', it.nome),
-      h('div', { class: 'mp-meta' }, it.meta || ''),
+      h('a', {
+        class: 'mp-nome', href: '#', title: chats.length ? 'Abrir o chat desta tarefa' : 'Abrir um chat novo para esta tarefa',
+        onclick: ev => { ev.preventDefault(); abrirTarefa({ n: it.n, tarefa, idx }); },
+      }, h('b', null, '#' + it.n), ' ', it.nome),
+      h('div', { class: 'mp-meta' }, it.meta || '',
+        chats.length ? null : h('button', { type: 'button', class: 'mp-novochat', title: 'Abre um chat novo já com o nome ' + tarefa, onclick: () => abrirTarefa({ n: it.n, tarefa }) }, '＋ Novo chat')),
+      chats.length ? h('div', { class: 'mp-chatlinha' },
+        chats.length > 1 ? h('span', { class: 'mp-navchat' },
+          h('button', { type: 'button', title: 'Chat anterior', 'aria-label': 'Chat anterior', disabled: idx >= chats.length - 1, onclick: () => trocarChat(it, tarefa, +1) }, '‹'),
+          h('b', null, `${idx + 1} de ${chats.length}`),
+          h('button', { type: 'button', title: 'Chat mais novo', 'aria-label': 'Chat mais novo', disabled: idx <= 0, onclick: () => trocarChat(it, tarefa, -1) }, '›')) : null,
+        h('button', { type: 'button', class: 'mp-chatq', title: 'Abrir: ' + chats[idx].titulo, onclick: () => abrirTarefa({ n: it.n, tarefa, idx }) },
+          '💬 ' + (chats[idx].titulo.split(' · ')[1] || 'chat') + (chats[idx].quando ? ' · ' + chats[idx].quando : ''))) : null,
       conf === it.n ? caixaConfirma(it) : h('div', { class: 'mp-acoes' },
         cfg.ver.map(b => b === 'noar' ? botaoNoAr(it, entrega)
           : h('button', { type: 'button', class: 'mp-b' + (b[2] && !entrega ? ' pri' : ''), onclick: () => ACOES[b[1]](it) }, b[0])),
@@ -414,9 +427,59 @@
   }
 
   async function abrirSessao(sid) {
-    try { if (typeof switchPanel === 'function') await switchPanel('chat'); await loadSession(sid); }
+    try { if (typeof switchPanel === 'function') await switchPanel('chat'); await loadSession(sid); piscar(sid); }
     catch (e) { toast('Essa conversa não abre aqui no navegador', 'error'); }
   }
+  // O chat aberto pisca de leve na lista da esquerda, para achar onde está.
+  function piscar(sid) {
+    let k = 0;
+    const t = setInterval(() => {
+      const row = document.querySelector(`#sessionList .session-item[data-sid="${CSS.escape(sid)}"]`);
+      if (row || ++k > 20) {
+        clearInterval(t);
+        if (!row) return;
+        row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        row.classList.remove('mp-pisca'); void row.offsetWidth; row.classList.add('mp-pisca');
+        setTimeout(() => row.classList.remove('mp-pisca'), 4000);
+      }
+    }, 150);
+  }
+
+  // ── chat de cada tarefa (clique na tarefa abre o chat, não o GitHub) ───────
+  const idxChat = new Map();
+  const chatsDe = n => (((estado && estado.chats) || (window.__mpEscritorioDados && window.__mpEscritorioDados.chats) || {})[String(n)] || []);
+  function trocarChat(it, tarefa, passo) {
+    const L = chatsDe(it.n);
+    const i = Math.max(0, Math.min(L.length - 1, (idxChat.get(it.n) || 0) + passo));
+    idxChat.set(it.n, i);
+    desenhar();
+    if (L[i]) abrirSessao(L[i].sid);
+  }
+  async function novoChatTarefa(n, tarefa) {
+    try {
+      if (typeof switchPanel === 'function') await switchPanel('chat');
+      await newSession(false);
+      const sid = sessaoAtual();
+      if (sid) {
+        try { await api('/api/session/rename', { method: 'POST', body: JSON.stringify({ session_id: sid, title: tarefa }) }); } catch (_) {}
+        try { if (S.session) S.session.title = tarefa; if (typeof renderSessionList === 'function') renderSessionList(); } catch (_) {}
+      }
+      const m = document.getElementById('msg');
+      m.value = `Sobre a Solicitação ${tarefa}: `;
+      m.dispatchEvent(new Event('input', { bubbles: true }));
+      m.focus(); m.setSelectionRange(m.value.length, m.value.length);
+      if (sid) piscar(sid);
+    } catch (e) { toast('Não consegui abrir o chat novo: ' + (e.message || e), 'error'); }
+  }
+  // {n, sid?, tarefa, idx?, chats?}: abre o chat certo da tarefa; sem chat, abre um novo com o título.
+  async function abrirTarefa(a) {
+    if (a.sid) return abrirSessao(a.sid);
+    if (!a.n) return;
+    const L = ((a.chats || {})[String(a.n)]) || chatsDe(a.n);
+    if (L.length) return abrirSessao(L[Math.min(a.idx || 0, L.length - 1)].sid);
+    return novoChatTarefa(a.n, a.tarefa || `#${a.n}`);
+  }
+  window.__mpAbrirTarefa = abrirTarefa;
 
   async function salvarReceitas(parcial) {
     try {
@@ -900,7 +963,7 @@
   // ── inicialização ──────────────────────────────────────────────────────────
   // O WebUI não muda o endereço do CSS entre versões: o navegador pode guardar o antigo.
   // Recarrega o CSS com a versão no endereço quando ela muda.
-  const VERSAO_CSS = '2.2.0';
+  const VERSAO_CSS = '2.3.0';
   function cssAtual() {
     const l = [...document.querySelectorAll('link[rel="stylesheet"]')].find(x => /maestro-painel\/assets\/painel\.css/.test(x.href));
     if (l && !l.href.includes('v=' + VERSAO_CSS)) l.href = l.href.split('?')[0] + '?v=' + VERSAO_CSS;

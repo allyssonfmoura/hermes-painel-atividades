@@ -19,6 +19,8 @@ Rotas:
   GET  /rodando                -> conversas com o agente trabalhando agora (state.db)
   GET  /nomes                  -> nomes padronizados a aplicar nas conversas do WebUI
   POST /nomes/aplicado {sid, titulo} -> extensão avisa que renomeou no WebUI
+  GET  /escritorio             -> mesas do escritório (agente, #N (efeito), passo, etapa, %)
+                                  + chats de cada tarefa (o clique abre a conversa, não o GitHub)
 
 Em segundo plano, a cada minuto, roda nomes_chats.py (padrão "#NNN (efeito) · ação").
 """
@@ -574,6 +576,182 @@ def conversas_rodando():
     return rodando
 
 
+# ── escritório dos agentes (prancha escritorio-agentes, 15/10/2026) ───────────
+ETAPAS = ["Planejar", "Construir", "Revisar", "Testar", "Publicar"]
+# Tempo típico de cada etapa (segundos), só para estimar "mais ou menos onde está".
+TIPICO = [1800, 3600, 900, 1500, 900]
+ETAPA_DA_FASE = {"analise": 0, "fila": 0, "voce": 0, "exec": 1, "testar": 3}
+EFEITOS = f"{HERMES}/painel/efeitos.json"
+AGORA_JSON = f"{HERMES}/painel/agora.json"
+RE_TITULO_N = re.compile(r"^#(\d+)\b")
+
+
+def _fases_e_nomes():
+    est = ler_json(ESTADO, {})
+    fase, nome = {}, {}
+    for g in est.get("grupos", []):
+        for it in g.get("itens", []):
+            fase[it["n"]] = g.get("chave")
+            nome[it["n"]] = it.get("nome", "")
+    return est, fase, nome
+
+
+def _efeito(n, nomes, efeitos):
+    e = efeitos.get(str(n))
+    if e:
+        return e
+    t = re.sub(r"^\[[^\]]*\]\s*", "", nomes.get(n, "")).split(":")[-1].strip()
+    return " ".join(t.split()[:6]).rstrip(",.;") or "sem nome"
+
+
+def _passo(n, linhas):
+    """Último passo escrito por painel-agora para o #N: o texto depois de "#N (efeito):".
+    O efeito pode ter ":" dentro ("app iPhone: ilha..."), então corta no "):" e não no 1º ":"."""
+    pad = re.compile(rf"#{n}\b")
+    for a in reversed(linhas):
+        t = a.get("texto", "")
+        if pad.search(t):
+            m = re.search(r"\)\s*:\s*(.+)$", t) or re.search(r":\s*(.+)$", t)
+            return (m.group(1) if m else t).strip()[:90], a.get("quando", "")
+    return "", ""
+
+
+def chats_por_tarefa():
+    """{n: [{sid, titulo, ts, fonte, app}]} do mais recente para o mais antigo.
+    app=True quando a conversa existe no state.db (o app do Mac só abre essas)."""
+    por = {}
+    con = sqlite3.connect(f"file:{HERMES}/state.db?mode=ro", uri=True, timeout=2)
+    try:
+        linhas = con.execute(
+            """select s.id, coalesce(s.title,''), s.source,
+                      coalesce(s.last_activity_at, (select max(timestamp) from messages where session_id=s.id), s.started_at)
+               from sessions s where coalesce(s.hidden,0)=0 and s.title like '#%'
+                 and s.source not in (?,?,?)""", FONTES_FORA).fetchall()
+    finally:
+        con.close()
+    vistos = set()
+    for sid, titulo, fonte, ts in linhas:
+        m = RE_TITULO_N.match(titulo)
+        if m:
+            por.setdefault(int(m.group(1)), []).append(
+                {"sid": sid, "titulo": titulo, "ts": float(ts or 0), "fonte": fonte, "app": True})
+            vistos.add(sid)
+    for f in glob.glob(f"{STATE_DIR}/sessions/*.json"):
+        sid = os.path.basename(f)[:-5]
+        if sid in vistos:
+            continue
+        try:
+            with open(f) as fh:
+                d = json.load(fh)
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        titulo = str(d.get("title") or "")
+        m = RE_TITULO_N.match(titulo)
+        if m:
+            ts = d.get("updated_at") or d.get("last_message_at") or os.path.getmtime(f)
+            try:
+                ts = float(ts)
+            except (TypeError, ValueError):
+                ts = os.path.getmtime(f)
+            por.setdefault(int(m.group(1)), []).append(
+                {"sid": sid, "titulo": titulo, "ts": ts, "fonte": "webui", "app": False})
+    for lst in por.values():
+        lst.sort(key=lambda c: -c["ts"])
+        for c in lst:
+            c["quando"] = quando(c["ts"]) if c["ts"] else ""
+    return por
+
+
+def escritorio():
+    """Mesas do escritório: um agente (ou vários iguais, ×k) trabalhando numa tarefa,
+    com a etapa da tarefa (0..4) e o quanto da etapa já andou (estimativa)."""
+    est, fase, nomes = _fases_e_nomes()
+    efeitos = ler_json(EFEITOS, {})
+    linhas = ler_json(AGORA_JSON, [])
+    linhas = linhas if isinstance(linhas, list) else []
+    mesas = {}
+
+    def mesa(chave, agente, n, etapa, seg, ativo=True, tarefa=None, passo_padrao="", sid=None):
+        m = mesas.get(chave)
+        if m:
+            m["qtd"] += 1
+            m["seg"] = max(m["seg"], seg)
+            return m
+        passo, _ = _passo(n, linhas) if n else ("", "")
+        m = mesas[chave] = {
+            "agente": agente, "n": n, "qtd": 1, "seg": int(seg), "ativo": ativo, "sid": sid,
+            "tarefa": tarefa or (f"#{n} ({_efeito(n, nomes, efeitos)})" if n else "conversa"),
+            "passo": passo or passo_padrao, "etapa": etapa}
+        return m
+
+    for pid, seg, cwd, args in processos():
+        n = num_da_pasta(cwd)
+        if re.search(r"(^|/)claude -p\b", args) or args.startswith("/root/.local/bin/claude -p"):
+            mesa(("claude", n or cwd), "claude", n, 1, seg, passo_padrao="construindo")
+        elif re.search(r"\bcodex(-linux[^ ]*)? exec\b", args) and "node " not in args[:5]:
+            mesa(("codex", n or cwd), "codex", n, 2, seg, passo_padrao="revisando")
+
+    try:
+        rod = conversas_rodando()
+    except Exception:  # noqa: BLE001
+        rod = []
+    if rod:
+        con = sqlite3.connect(f"file:{HERMES}/state.db?mode=ro", uri=True, timeout=2)
+        try:
+            for c in rod:
+                if (c["titulo"] or "").startswith("Pergunta rápida do Allysson"):
+                    continue
+                ini = con.execute("select max(timestamp) from messages where session_id=? and role='user'",
+                                  (c["sid"],)).fetchone()[0] or c["desde"]
+                mm = RE_TITULO_N.match(c["titulo"] or "")
+                n = int(mm.group(1)) if mm else None
+                etapa = ETAPA_DA_FASE.get(fase.get(n), 0) if n else None
+                tarefa = None if n else re.sub(r"\s·\s[^·]+$", "", c["titulo"] or "Conversa nova")[:60]
+                m = mesa(("hermes", n or c["sid"]), "hermes", n, etapa, time.time() - ini,
+                         tarefa=tarefa, passo_padrao="conversando com você", sid=c["sid"])
+                m["sid"] = m["sid"] or c["sid"]
+        finally:
+            con.close()
+
+    for r in est.get("rodando", []):
+        txt = r.get("texto", "")
+        if r.get("tipo") == "publicacao" or txt.startswith("Publicando"):
+            ativo = txt.startswith("Publicando")
+            emp = txt.split(" na ", 1)[-1]
+            mesa(("pub", emp), "publicacao", None, 4, 0, ativo=ativo, tarefa=r.get("detalhe") or txt,
+                 passo_padrao=("publicando na " if ativo else "esperando você publicar na ") + emp)
+
+    saida = []
+    for m in mesas.values():
+        e = m["etapa"]
+        if e is None:
+            m["pct"] = None
+        else:
+            m["pct"] = 10 if not m["ativo"] else max(8, min(92, int(100 * m["seg"] / TIPICO[e])))
+        m["tempo"] = duracao(m["seg"]) if m["seg"] else ""
+        saida.append(m)
+    ordem = {"claude": 0, "codex": 1, "hermes": 2, "publicacao": 3}
+    saida.sort(key=lambda m: (not m["ativo"], ordem.get(m["agente"], 9), -(m["n"] or 0)))
+    # Chat mais recente de cada tarefa, para o clique na mesa abrir a conversa certa.
+    try:
+        por = chats_por_tarefa()
+    except Exception:  # noqa: BLE001
+        por = {}
+    for m in saida:
+        if m["n"] and not m["sid"] and por.get(m["n"]):
+            m["sid"] = por[m["n"]][0]["sid"]
+    return {"mesas": saida, "etapas": ETAPAS, "chats": {str(k): v for k, v in por.items()}}
+
+
+def _chats_seguro():
+    try:
+        return {str(k): v for k, v in chats_por_tarefa().items()}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 _LOCK_NOMES = threading.Lock()
 
 
@@ -624,6 +802,7 @@ class H(BaseHTTPRequestHandler):
                     "agora": est.get("agora", []), "rodando": est.get("rodando", []),
                     "agentes": agentes_vivos(), "arquivos": arquivos_recentes(), "ambiente": ambiente(),
                     "receitas": receitas(), "limite_compressao": limite_compressao(),
+                    "chats": _chats_seguro(), "efeitos": ler_json(EFEITOS, {}),
                 })
             if rota.startswith("/pergunta/"):
                 with _LOCK_P:
@@ -633,6 +812,8 @@ class H(BaseHTTPRequestHandler):
                 return self._resp(200, {"rodando": conversas_rodando()})
             if rota == "/nomes":
                 return self._resp(200, {"nomes": nomes_pendentes()})
+            if rota == "/escritorio":
+                return self._resp(200, escritorio())
             if rota == "/agentes":
                 return self._resp(200, {"pagadores": pagadores(), "receitas": receitas(), "nomes": AGENTES})
             return self._resp(404, {"erro": "rota desconhecida"})

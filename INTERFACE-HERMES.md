@@ -54,6 +54,19 @@ O app do Mac chega nele por `shell.exec` + curl. Resposta sempre em ASCII (acent
 - App (plugin 2.2.0): fixa o chat rodando no topo com o "Fixar" do próprio app e solta quando termina (só os que
   ele fixou); linha com fundo verde e ponto pulsando à direita (some ao passar o mouse, para não cobrir o ⋯).
 
+**Escritório dos agentes + clique abre o chat** (15/10/2026, prancha `escritorio-agentes`, aprovada com as
+sugestões: agentes iguais na mesma tarefa = uma mesa "×k"; ninguém trabalhando = linha "Escritório vazio")
+- Núcleo único `comum/escritorio-core.js`; `python3 comum/sincronizar.py` copia para o WebUI e para o app.
+- Rota `/escritorio` do sidecar: mesas (Claude = executor `claude -p`, Codex = `codex exec`, Hermes = chat
+  rodando, Publicação = `publica/*`), passo atual vindo do `painel-agora`, etapa Planejar→Construir→Revisar→
+  Testar→Publicar e % estimado pelo tempo típico da etapa. `/estado` traz `chats` (chats de cada #N pelo título,
+  mais recente primeiro) e `efeitos`.
+- WebUI: caixa no rodapé da barra de conversas (computador); faixa acima da caixa de mensagem no celular, tocar
+  abre. App (plugin 2.3.0): caixa no rodapé da barra da esquerda e menu das seções recolhido no "☰ Menu".
+- Painel da direita: clicar no nome da tarefa abre o chat mais recente; "‹ 1 de N ›" passa para os outros;
+  sem chat, "＋ Novo chat" (WebUI já cria com o nome #N (efeito); no app o nome vem do renomeador ao enviar).
+  GitHub ficou só no menu ⋯. O chat aberto pisca na lista da esquerda.
+
 ## Como publicar uma mudança
 - WebUI: editar `webui/extensao/assets/*`, rodar `python3 webui/instalar.py` (padrão `/root/.hermes/webui`);
   basta recarregar a página.
